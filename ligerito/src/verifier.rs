@@ -2,21 +2,114 @@
 use alloc::vec::Vec;
 
 use crate::{
-    eval_proof::{absorb_claims, folded_batched_eq, EvalClaim},
-    sumcheck_polys::{eval_round_poly, fold_lsb, inner_product, tensorized_dot_product},
+    eval_proof::{absorb_claims, EvalClaim},
+    sumcheck_polys::{eval_round_poly, precompute_alpha_powers, tensorized_dot_product},
     transcript::{FiatShamir, Transcript},
-    utils::{eval_sk_at_vks, evaluate_scaled_basis_inplace, hash_row},
+    utils::{eval_sk_at_vks, hash_row},
     FinalizedLigeritoProof, VerifierConfig,
 };
 use binary_fields::BinaryFieldElement;
 use merkle_tree::{BatchedMerkleProof, Hash, MerkleRoot};
 
-#[cfg(feature = "parallel")]
-use crate::sumcheck_polys::induce_sumcheck_poly_parallel as induce_sumcheck_poly_auto;
-#[cfg(not(feature = "parallel"))]
-use crate::sumcheck_polys::induce_sumcheck_poly as induce_sumcheck_poly_auto;
-
 const LOG_INV_RATE: usize = 2;
+
+/// `s_j(x)` for `j < k` (see `utils::evaluate_scaled_basis_inplace`).
+fn subspace_evals<F: BinaryFieldElement>(x: F, k: usize, sks_vks: &[F]) -> Vec<F> {
+    let mut s = Vec::with_capacity(k);
+    if k > 0 {
+        s.push(x);
+        for j in 1..k {
+            let p = s[j - 1];
+            s.push(p.mul(&p).add(&sks_vks[j - 1].mul(&p)));
+        }
+    }
+    s
+}
+
+/// `⟨y, ⊗_j (1, a_j)⟩` with `a_0` on the lsb of the index.
+fn tensor_inner<U: BinaryFieldElement>(y: &[U], a: &[U]) -> U {
+    debug_assert_eq!(y.len(), 1 << a.len());
+    let mut cur: Vec<U> = y.chunks_exact(2).map(|p| p[0].add(&a[0].mul(&p[1]))).collect();
+    for &aj in &a[1..] {
+        cur = cur.chunks_exact(2).map(|p| p[0].add(&aj.mul(&p[1]))).collect();
+    }
+    cur[0]
+}
+
+/// The verifier's running batched basis `B`, kept factored instead of as a
+/// length-`m` vector: a sum of scaled generator rows `c · ⊗_{j≥off}(1, a_j)`
+/// plus a sparse part from evaluation claims.
+///
+/// Binding the lsb variable of `c · (1, a_off) ⊗ rest` to `r` gives
+/// `c · (1 + r·(a_off + 1)) · rest`, so each fold is O(#terms) and the final
+/// `⟨yr, B⟩` is O(#terms · |yr|), independent of the initial message length.
+struct FactoredBasis<U> {
+    rows: Vec<(U, Vec<U>, usize)>,
+    sparse: Vec<(usize, U)>,
+}
+
+impl<U: BinaryFieldElement> FactoredBasis<U> {
+    /// Add `scale · Σ_k α^k · G[q_k]` for a code with message length `2^log_m`
+    /// over field `F`, and return `Σ_k α^k · ⟨row_k, eq(rs)⟩` (the claim it
+    /// enforces on the next message).
+    fn add_queries<F>(
+        &mut self,
+        log_m: usize,
+        rows: &[Vec<F>],
+        queries: &[usize],
+        rs: &[U],
+        alpha: U,
+        scale: U,
+    ) -> U
+    where
+        F: BinaryFieldElement,
+        U: From<F>,
+    {
+        let sks_vks: Vec<F> = eval_sk_at_vks(1 << log_m);
+        let alpha_pows = precompute_alpha_powers(alpha, queries.len());
+        let mut sum = U::zero();
+        for ((row, &q), &ak) in rows.iter().zip(queries).zip(&alpha_pows) {
+            sum = sum.add(&ak.mul(&tensorized_dot_product(row, rs)));
+            let a = subspace_evals(F::from_bits(q as u64), log_m, &sks_vks)
+                .into_iter()
+                .map(U::from)
+                .collect();
+            self.rows.push((scale.mul(&ak), a, 0));
+        }
+        sum
+    }
+
+    fn fold(&mut self, r: U) {
+        let one = U::one();
+        for (c, a, off) in &mut self.rows {
+            *c = c.mul(&one.add(&r.mul(&a[*off].add(&one))));
+            *off += 1;
+        }
+        for (i, w) in &mut self.sparse {
+            *w = w.mul(&if *i & 1 == 1 { r } else { one.add(&r) });
+            *i >>= 1;
+        }
+    }
+
+    fn scale(&mut self, beta: U) {
+        for (c, _, _) in &mut self.rows {
+            *c = c.mul(&beta);
+        }
+        for (_, w) in &mut self.sparse {
+            *w = w.mul(&beta);
+        }
+    }
+
+    fn inner(&self, y: &[U]) -> U {
+        let rows = self
+            .rows
+            .iter()
+            .fold(U::zero(), |acc, (c, a, off)| acc.add(&c.mul(&tensor_inner(y, &a[*off..]))));
+        self.sparse
+            .iter()
+            .fold(rows, |acc, &(i, w)| acc.add(&w.mul(&y[i])))
+    }
+}
 
 /// Verify a Ligerito proof (default Merlin transcript)
 pub fn verify<T, U>(
@@ -140,26 +233,36 @@ where
         return Ok(false);
     };
     let alpha = fs.get_challenge::<U>();
-    let sks_vks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
-    let (b_0, s_0) = induce_sumcheck_poly_auto(
+    let mut basis = FactoredBasis {
+        rows: Vec::with_capacity(queries.len() * steps),
+        sparse: Vec::new(),
+    };
+    let s_0 = basis.add_queries::<T>(
         config.initial_dim,
-        &sks_vks,
         &initial.opened_rows,
-        &rho_0,
         &queries,
+        &rho_0,
         alpha,
+        U::one(),
     );
     fs.absorb_elem(s_0);
 
-    let mut basis = if claims.is_empty() {
+    if claims.is_empty() {
         sum = s_0;
-        b_0
     } else {
-        let q = folded_batched_eq(claims, &eval_alphas, &rho_0, 1 << config.initial_dim);
+        // Q(ρ_0, ·): claim k sits at z_k >> initial_k with weight
+        // α_k · eq(z_k mod 2^initial_k, ρ_0); glue b_0 in with β
         let beta = fs.get_challenge::<U>();
+        basis.scale(beta);
+        for (c, &a) in claims.iter().zip(&eval_alphas) {
+            let mut w = a;
+            for (j, &r) in rho_0.iter().enumerate() {
+                w = w.mul(&if (c.index >> j) & 1 == 1 { r } else { U::one().add(&r) });
+            }
+            basis.sparse.push((c.index >> config.initial_k, w));
+        }
         sum = sum.add(&beta.mul(&s_0));
-        q.iter().zip(&b_0).map(|(qi, bi)| qi.add(&beta.mul(bi))).collect()
-    };
+    }
 
     let mut rounds = proof.sumcheck_transcript.transcript.iter();
 
@@ -177,14 +280,12 @@ where
             fs.absorb_elem(coeffs.2);
             let r = fs.get_challenge::<U>();
             sum = eval_round_poly(coeffs, r);
-            basis = fold_lsb(&basis, r);
+            basis.fold(r);
             rs.push(r);
         }
 
         let root = &proof.recursive_commitments[i].root;
         let log_rows = config.log_dims[i] + LOG_INV_RATE;
-        let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
-
         if i == last {
             let fin = &proof.final_ligero_proof;
             fs.absorb_elems(&fin.yr);
@@ -201,22 +302,16 @@ where
             };
 
             // the sumcheck chain must end in the claimed folded message
-            if inner_product(&fin.yr, &basis) != sum {
+            if basis.inner(&fin.yr) != sum {
                 return Ok(false);
             }
 
-            // every opened row of the final commitment must agree with yr
-            let mut sks_x = vec![U::zero(); sks_vks.len()];
-            let mut gen_row = vec![U::zero(); fin.yr.len()];
+            // every opened row of the final commitment must agree with yr:
+            // ⟨row_q, eq(rs)⟩ = Enc(yr)[q] = ⟨yr, ⊗_j (1, s_j(ω_q))⟩
+            let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
             for (&q, row) in queries.iter().zip(&fin.opened_rows) {
-                evaluate_scaled_basis_inplace(
-                    &mut sks_x,
-                    &mut gen_row,
-                    &sks_vks,
-                    U::from_bits(q as u64),
-                    U::one(),
-                );
-                if tensorized_dot_product(row, &rs) != inner_product(&fin.yr, &gen_row) {
+                let a = subspace_evals(U::from_bits(q as u64), config.log_dims[i], &sks_vks);
+                if tensorized_dot_product(row, &rs) != tensor_inner(&fin.yr, &a) {
                     return Ok(false);
                 }
             }
@@ -237,18 +332,22 @@ where
             return Ok(false);
         };
         let alpha = fs.get_challenge::<U>();
-        let (b, s) = induce_sumcheck_poly_auto(
+        // β is drawn after s is absorbed, so add the rows unscaled and fix up
+        let start = basis.rows.len();
+        let s = basis.add_queries::<U>(
             config.log_dims[i],
-            &sks_vks,
             &ligero_proof.opened_rows,
-            &rs,
             &queries,
+            &rs,
             alpha,
+            U::one(),
         );
         fs.absorb_elem(s);
         let beta = fs.get_challenge::<U>();
         sum = sum.add(&beta.mul(&s));
-        basis = basis.iter().zip(&b).map(|(x, y)| x.add(&beta.mul(y))).collect();
+        for (c, _, _) in &mut basis.rows[start..] {
+            *c = c.mul(&beta);
+        }
     }
 
     unreachable!("the final round returns")
@@ -583,7 +682,7 @@ mod tests {
     #[test]
     fn test_random_matrix_forgery_rejected() {
         use crate::data_structures::{finalize, RecursiveLigeroWitness};
-        use crate::sumcheck_polys::{induce_sumcheck_poly, product_round_coeffs};
+        use crate::sumcheck_polys::{fold_lsb, induce_sumcheck_poly, product_round_coeffs};
         use crate::{
             FinalLigeroProof, LigeritoProof, RecursiveLigeroCommitment, RecursiveLigeroProof,
             SumcheckTranscript,
