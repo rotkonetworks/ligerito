@@ -73,8 +73,10 @@ fn test_tensorized_matches_naive() {
         BinaryElem128::from_bits(11),
     ];
 
-    // Naive method
-    let basis = evaluate_lagrange_basis(&challenges);
+    // Naive method. evaluate_lagrange_basis binds its first challenge to the
+    // msb of the index; the fold binds challenges lsb-first, so reverse.
+    let reversed: Vec<BinaryElem128> = challenges.iter().rev().copied().collect();
+    let basis = evaluate_lagrange_basis(&reversed);
     let naive_result: BinaryElem128 = row
         .iter()
         .zip(basis.iter())

@@ -7,10 +7,14 @@
 //! After n sumcheck rounds, the claim reduces to P(r) · Q(r) at a random
 //! point r. The verifier computes Q(r) and extracts P(r).
 //!
-//! NOTE: The eval sumcheck alone does NOT bind to the committed polynomial.
-//! A malicious prover could use a different polynomial for the sumcheck vs
-//! the Merkle commitment. Full soundness requires an evaluation opening
-//! that ties P(r) to the commitment (not yet implemented).
+//! `prove_with_evaluations` / `verify_with_evaluations` bind the claims to the
+//! commitment: the first `initial_k` rounds of this sumcheck (over the column
+//! variables) supply the Ligerito challenges `ρ_0`, and the residual claim
+//! `Σ_x' P(ρ_0, x')·Q(ρ_0, x')` is glued into the main Ligerito sumcheck.
+//!
+//! The standalone `eval_sumcheck_prove` / `eval_sumcheck_verify` below run all
+//! `n` rounds and return an unbound `P(r)`; on their own they prove nothing
+//! about a commitment.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

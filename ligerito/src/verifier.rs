@@ -576,4 +576,97 @@ mod tests {
             "SHA256 proof should NOT verify with Blake2b transcript"
         );
     }
+
+    /// Commit uniformly random (non-codeword) matrices and follow the
+    /// transcript exactly, patching every round message so `g(0) + g(1)`
+    /// matches the running claim. This forgery verified before the fix.
+    #[test]
+    fn test_random_matrix_forgery_rejected() {
+        use crate::data_structures::{finalize, RecursiveLigeroWitness};
+        use crate::sumcheck_polys::{induce_sumcheck_poly, product_round_coeffs};
+        use crate::{
+            FinalLigeroProof, LigeritoProof, RecursiveLigeroCommitment, RecursiveLigeroProof,
+            SumcheckTranscript,
+        };
+        type T = BinaryElem32;
+        type U = BinaryElem128;
+
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        fn garbage<F: BinaryFieldElement + bytemuck::Pod + Send + Sync>(
+            rows: usize,
+            cols: usize,
+            rnd: &mut impl FnMut() -> u64,
+        ) -> RecursiveLigeroWitness<F> {
+            let mat: Vec<Vec<F>> = (0..rows)
+                .map(|_| (0..cols).map(|_| F::from_bits(rnd())).collect())
+                .collect();
+            let hashes: Vec<Hash> = mat.iter().map(|r| hash_row(r)).collect();
+            let tree = merkle_tree::build_merkle_tree(&hashes);
+            RecursiveLigeroWitness { mat, tree }
+        }
+
+        let pc = hardcoded_config_12(PhantomData::<T>, PhantomData::<U>);
+        let vc = hardcoded_config_12_verifier();
+        let mut fs = FiatShamir::new_sha256(0);
+
+        vc.absorb_into(&mut fs);
+        let w0 = garbage::<T>(pc.initial_dims.0 * 4, pc.initial_dims.1, &mut rnd);
+        let cm0 = RecursiveLigeroCommitment { root: w0.tree.get_root() };
+        fs.absorb_root(&cm0.root);
+        absorb_claims::<T>(&mut fs, &[]);
+        let rho0: Vec<U> = (0..vc.initial_k).map(|_| fs.get_challenge()).collect();
+
+        let w1 = garbage::<U>(pc.dims[0].0 * 4, pc.dims[0].1, &mut rnd);
+        let cm1 = RecursiveLigeroCommitment { root: w1.tree.get_root() };
+        fs.absorb_root(&cm1.root);
+
+        let queries = fs.get_distinct_queries(w0.mat.len(), vc.num_queries);
+        let alpha = fs.get_challenge::<U>();
+        let rows: Vec<Vec<T>> = queries.iter().map(|&q| w0.mat[q].clone()).collect();
+        let sks: Vec<T> = eval_sk_at_vks(1 << vc.initial_dim);
+        let (mut basis, mut sum) =
+            induce_sumcheck_poly(vc.initial_dim, &sks, &rows, &rho0, &queries, alpha);
+        fs.absorb_elem(sum);
+
+        // the forger's message: anything of the right length
+        let mut v: Vec<U> = (0..1 << vc.initial_dim).map(|_| U::from_bits(rnd())).collect();
+        let mut transcript = vec![];
+        for _ in 0..vc.ks[0] {
+            let (s0, _, s2) = product_round_coeffs(&v, &basis);
+            let c = (s0, s0.add(&sum), s2); // force g(0) + g(1) = sum
+            fs.absorb_elem(c.0);
+            fs.absorb_elem(c.1);
+            fs.absorb_elem(c.2);
+            let r = fs.get_challenge::<U>();
+            sum = eval_round_poly(c, r);
+            v = fold_lsb(&v, r);
+            basis = fold_lsb(&basis, r);
+            transcript.push(c);
+        }
+        fs.absorb_elems(&v);
+        let fq = fs.get_distinct_queries(w1.mat.len(), vc.num_queries);
+
+        let mut proof = LigeritoProof::<T, U>::new();
+        proof.initial_ligero_cm = Some(cm0);
+        proof.initial_ligero_proof = Some(RecursiveLigeroProof {
+            opened_rows: rows,
+            merkle_proof: w0.tree.prove(&queries),
+        });
+        proof.recursive_commitments.push(cm1);
+        proof.final_ligero_proof = Some(FinalLigeroProof {
+            yr: v,
+            opened_rows: fq.iter().map(|&q| w1.mat[q].clone()).collect(),
+            merkle_proof: w1.tree.prove(&fq),
+        });
+        proof.sumcheck_transcript = Some(SumcheckTranscript { transcript });
+        let proof = finalize(proof).unwrap();
+
+        assert!(!verify_with_transcript(&vc, &proof, FiatShamir::new_sha256(0)).unwrap());
+    }
 }

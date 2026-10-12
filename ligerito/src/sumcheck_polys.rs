@@ -296,6 +296,7 @@ mod tests {
         check::<BinaryElem128>(32, 4);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn test_parallel_vs_sequential() {
         // Test that parallel and sequential versions produce identical results
@@ -356,6 +357,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn test_sumcheck_parallel_consistency() {
         let n = 2; // 2^2 = 4 elements
