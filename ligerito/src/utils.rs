@@ -74,41 +74,16 @@ pub fn eval_sk_at_vks<F: BinaryFieldElement>(n: usize) -> Vec<F> {
     sks_vks
 }
 
-/// Robust helper function to convert field element to index
-/// This tries multiple strategies to find the correct mapping
-#[allow(dead_code)]
-fn field_to_index<F: BinaryFieldElement>(elem: F) -> usize {
-    // Strategy 1: Handle zero case explicitly
-    if elem == F::zero() {
-        return 0;
-    }
-
-    // Strategy 2: Try small integers first (most common case)
-    for i in 0..256 {
-        if F::from_bits(i as u64) == elem {
-            return i;
-        }
-    }
-
-    // Strategy 3: For larger elements, extract lower bits
-    // Convert to raw bytes and interpret as little-endian integer
-    let elem_bytes = unsafe {
-        core::slice::from_raw_parts(&elem as *const F as *const u8, core::mem::size_of::<F>())
-    };
-
-    let mut result = 0usize;
-    let bytes_to_use = core::cmp::min(elem_bytes.len(), 8); // Use up to 64 bits
-
-    for i in 0..bytes_to_use {
-        result |= (elem_bytes[i] as usize) << (i * 8);
-    }
-
-    // Ensure result is reasonable for our polynomial sizes
-    result % 4096 // This should be larger than any polynomial size we're using
-}
-
-/// Evaluate scaled basis - creates a delta function at the query point
-/// Optimized: directly extracts index from field element instead of searching
+/// Row `qf` of the non-systematic Reed-Solomon generator matrix, scaled.
+///
+/// Writes `basis[i] = scale · X_i(qf)` where `X_i(x) = Π_{j : bit j of i} s_j(x)`
+/// is the unnormalised novel polynomial basis and `s_j` the subspace vanishing
+/// polynomials. With `qf = from_bits(q)` this is exactly
+/// `encode_non_systematic(e_i)[q]`, so for a message `v`:
+/// `Enc(v)[q] = Σ_i v[i] · basis[i]` (with `scale = 1`).
+///
+/// `sks_x` is scratch (length ≥ log₂ |basis|) and receives `s_j(qf)`;
+/// `sks_vks` comes from `eval_sk_at_vks(|basis|)`.
 pub fn evaluate_scaled_basis_inplace<F: BinaryFieldElement, U: BinaryFieldElement>(
     sks_x: &mut [F],
     basis: &mut [U],
@@ -119,71 +94,27 @@ pub fn evaluate_scaled_basis_inplace<F: BinaryFieldElement, U: BinaryFieldElemen
     U: From<F>,
 {
     let n = basis.len();
-    let num_subspaces = n.trailing_zeros() as usize;
+    assert!(n.is_power_of_two(), "basis length must be a power of two");
+    let k = n.trailing_zeros() as usize;
+    assert!(sks_x.len() >= k && sks_vks.len() >= k);
 
-    // Clear the basis - use memset-style clear for speed
-    // Safety: U is a field element that supports zero initialization
-    for b in basis.iter_mut() {
-        *b = U::zero();
-    }
-
-    // Direct index extraction: qf was created via F::from_bits(query_mod as u64)
-    // where query_mod = query % (1 << n), so the underlying value IS the index
-    // Extract the raw bits directly instead of searching
-    let idx = extract_index_from_field(&qf, n);
-    if idx < n {
-        basis[idx] = scale;
-    }
-
-    // Fill sks_x if provided (for compatibility with the multilinear extension)
-    if num_subspaces > 0 && sks_x.len() >= num_subspaces && sks_vks.len() >= num_subspaces {
+    if k > 0 {
         sks_x[0] = qf;
-        for i in 1..num_subspaces {
-            let s_prev = sks_x[i - 1];
-            let s_prev_at_root = sks_vks[i - 1];
-            sks_x[i] = s_prev.mul(&s_prev).add(&s_prev_at_root.mul(&s_prev));
+        for j in 1..k {
+            let s_prev = sks_x[j - 1];
+            sks_x[j] = s_prev.mul(&s_prev).add(&sks_vks[j - 1].mul(&s_prev));
         }
     }
-}
 
-/// Extract index from field element by reading its raw bits
-/// This is O(1) instead of O(n) search
-#[inline(always)]
-fn extract_index_from_field<F: BinaryFieldElement>(elem: &F, max_n: usize) -> usize {
-    // For binary field elements, from_bits(i) creates an element whose
-    // polynomial representation has value i. Extract that value directly.
-    let elem_bytes = unsafe {
-        core::slice::from_raw_parts(elem as *const F as *const u8, core::mem::size_of::<F>())
-    };
-
-    // Read as little-endian usize (first 8 bytes max)
-    let mut idx = 0usize;
-    let bytes_to_read = core::cmp::min(elem_bytes.len(), core::mem::size_of::<usize>());
-    for i in 0..bytes_to_read {
-        idx |= (elem_bytes[i] as usize) << (i * 8);
+    // tensor product: bit j of the index selects the factor s_j(qf)
+    basis[0] = scale;
+    for j in 0..k {
+        let half = 1 << j;
+        let s = U::from(sks_x[j]);
+        for i in 0..half {
+            basis[half + i] = basis[i].mul(&s);
+        }
     }
-
-    // Mask to valid range
-    idx & (max_n - 1)
-}
-
-/// Alternative implementation using proper multilinear extension formula
-/// This builds the actual multilinear polynomial (more complex but mathematically complete)
-pub fn evaluate_multilinear_extension<F: BinaryFieldElement, U: BinaryFieldElement>(
-    basis: &mut [U],
-    qf: F,
-    scale: U,
-) where
-    U: From<F>,
-{
-    let n = basis.len();
-    if !n.is_power_of_two() {
-        panic!("Basis length must be power of 2");
-    }
-
-    // For simplicity and reliability, let's use the same approach as the main function
-    // This ensures consistency between the two implementations
-    evaluate_scaled_basis_inplace(&mut [], basis, &[], qf, scale);
 }
 
 /// Check if a number is a power of 2
@@ -222,34 +153,6 @@ pub fn partial_eval_multilinear<F: BinaryFieldElement>(poly: &mut Vec<F>, evals:
 mod tests {
     use super::*;
     use binary_fields::{BinaryElem128, BinaryElem16, BinaryElem32};
-
-    #[test]
-    fn test_field_element_conversion() {
-        println!("Testing field element conversions:");
-
-        // Test that zero maps to zero
-        let zero = BinaryElem32::zero();
-        let zero_index = field_to_index(zero);
-        assert_eq!(zero_index, 0, "Zero should map to index 0");
-
-        // Test small values
-        for i in 0..10 {
-            let elem = BinaryElem32::from_bits(i);
-            let converted_index = field_to_index(elem);
-            println!(
-                "from_bits({}) -> field_to_index() -> {}",
-                i, converted_index
-            );
-
-            // For small values, it should be exact or at least consistent
-            if i < 256 {
-                assert_eq!(
-                    converted_index, i as usize,
-                    "Small values should convert exactly"
-                );
-            }
-        }
-    }
 
     #[test]
     fn test_lagrange_basis() {
@@ -292,66 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn test_multilinear_delta_function() {
-        let mut basis = vec![BinaryElem128::zero(); 8]; // 2^3
-        let mut sks_x = vec![BinaryElem32::zero(); 4];
-        let sks_vks = vec![BinaryElem32::one(); 4];
-
-        let qf = BinaryElem32::from_bits(5);
-        let scale = BinaryElem128::from_bits(42);
-
-        evaluate_scaled_basis_inplace(&mut sks_x, &mut basis, &sks_vks, qf, scale);
-
-        // Check that we have exactly one non-zero entry
-        let non_zero_count = basis
-            .iter()
-            .filter(|&&x| x != BinaryElem128::zero())
-            .count();
-        assert_eq!(non_zero_count, 1, "Should have exactly one non-zero entry");
-
-        // Check that the sum equals the scale
-        let sum = basis
-            .iter()
-            .fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
-        assert_eq!(sum, scale, "Sum should equal scale");
-
-        // Find which index is non-zero
-        let non_zero_index = basis
-            .iter()
-            .position(|&x| x != BinaryElem128::zero())
-            .unwrap();
-        println!("Non-zero entry at index: {}", non_zero_index);
-        assert_eq!(
-            basis[non_zero_index], scale,
-            "Non-zero entry should equal scale"
-        );
-    }
-
-    #[test]
-    fn test_multilinear_extension_full() {
-        let mut basis = vec![BinaryElem128::zero(); 4]; // 2^2
-        let qf = BinaryElem32::from_bits(2);
-        let scale = BinaryElem128::from_bits(7);
-
-        evaluate_multilinear_extension(&mut basis, qf, scale);
-
-        // The sum should equal scale (since it's a delta function)
-        let sum = basis
-            .iter()
-            .fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
-        assert_eq!(sum, scale, "Sum should equal scale");
-
-        // Should have exactly one non-zero entry
-        let non_zero_count = basis
-            .iter()
-            .filter(|&&x| x != BinaryElem128::zero())
-            .count();
-        assert_eq!(non_zero_count, 1, "Should have exactly one non-zero entry");
-
-        println!("Multilinear extension for qf=2: {:?}", basis);
-    }
-
-    #[test]
     fn test_sk_evaluation() {
         // Test for n = 16
         let sks_vks = eval_sk_at_vks::<BinaryElem32>(16);
@@ -386,41 +229,36 @@ mod tests {
         assert_eq!(poly.len(), original_len / 2);
     }
 
+    /// The basis row must be the generator row of `encode_non_systematic`
+    /// at every domain point, including those past the message length.
+    #[cfg(feature = "prover")]
     #[test]
-    fn test_delta_function_properties() {
-        // Test that the delta function works correctly for different field elements
-        let test_cases = vec![
-            (BinaryElem32::zero(), 8),         // Zero element
-            (BinaryElem32::from_bits(1), 8),   // One
-            (BinaryElem32::from_bits(7), 8),   // Max value for 2^3
-            (BinaryElem32::from_bits(15), 16), // Max value for 2^4
-        ];
-
-        for (qf, n) in test_cases {
-            let mut basis = vec![BinaryElem128::zero(); n];
-            let mut sks_x = vec![BinaryElem32::zero(); 4];
-            let sks_vks = vec![BinaryElem32::one(); 4];
-            let scale = BinaryElem128::from_bits(123);
-
-            evaluate_scaled_basis_inplace(&mut sks_x, &mut basis, &sks_vks, qf, scale);
-
-            // Should have exactly one non-zero entry
-            let non_zero_count = basis
-                .iter()
-                .filter(|&&x| x != BinaryElem128::zero())
-                .count();
-            assert_eq!(
-                non_zero_count, 1,
-                "Should have exactly one non-zero entry for qf={:?}",
-                qf
-            );
-
-            // Sum should equal scale
-            let sum = basis
-                .iter()
-                .fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
-            assert_eq!(sum, scale, "Sum should equal scale for qf={:?}", qf);
+    fn test_scaled_basis_is_generator_row() {
+        fn check<F: BinaryFieldElement + 'static>(m: usize) {
+            let n = 4 * m;
+            let rs = reed_solomon::reed_solomon::<F>(m, n);
+            let sks_vks = eval_sk_at_vks::<F>(m);
+            let cols: Vec<Vec<F>> = (0..m)
+                .map(|i| {
+                    let mut d = vec![F::zero(); n];
+                    d[i] = F::one();
+                    reed_solomon::encode_non_systematic(&rs, &mut d);
+                    d
+                })
+                .collect();
+            let mut sks_x = vec![F::zero(); sks_vks.len()];
+            let mut basis = vec![F::zero(); m];
+            for q in 0..n {
+                let qf = F::from_bits(q as u64);
+                evaluate_scaled_basis_inplace(&mut sks_x, &mut basis, &sks_vks, qf, F::one());
+                for i in 0..m {
+                    assert_eq!(basis[i], cols[i][q], "m={m} q={q} i={i}");
+                }
+            }
         }
+        check::<BinaryElem32>(16);
+        check::<BinaryElem32>(64);
+        check::<BinaryElem128>(32);
     }
 }
 
@@ -443,20 +281,4 @@ pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> merkle_tree::Hash {
     }
 
     hasher.finalize().into()
-}
-
-/// Verify Ligero opening consistency (used by verifier)
-pub fn verify_ligero<T, U>(queries: &[usize], opened_rows: &[Vec<T>], yr: &[T], challenges: &[U])
-where
-    T: BinaryFieldElement,
-    U: BinaryFieldElement + From<T>,
-{
-    let gr = evaluate_lagrange_basis(challenges);
-    let n = yr.len().trailing_zeros() as usize;
-    let sks_vks: Vec<T> = eval_sk_at_vks(1 << n);
-
-    // Verify first query as a sanity check
-    if !queries.is_empty() && !opened_rows.is_empty() {
-        let _ = (yr, sks_vks, gr, opened_rows); // Suppress unused warnings
-    }
 }

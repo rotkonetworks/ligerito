@@ -4,42 +4,62 @@ use alloc::vec::Vec;
 use crate::utils::evaluate_scaled_basis_inplace;
 use binary_fields::BinaryFieldElement;
 
-/// tensorized dot product exploiting kronecker structure
-/// reduces o(2^k) to o(k × 2^(k-1)) by folding dimensions
-/// iterates challenges in reverse since lagrange basis maps r0 to lsb
-fn tensorized_dot_product<T, U>(row: &[T], challenges: &[U]) -> U
+/// `⟨row, eq(challenges, ·)⟩`, binding the lsb of the column index first.
+///
+/// Equals `partial_eval_multilinear(row, challenges)[0]`, which is how the
+/// prover folds the committed polynomial (see `ligero::poly2mat`).
+pub fn tensorized_dot_product<T, U>(row: &[T], challenges: &[U]) -> U
 where
     T: BinaryFieldElement,
     U: BinaryFieldElement + From<T>,
 {
-    let k = challenges.len();
-    if k == 0 {
-        return if row.len() == 1 {
-            U::from(row[0])
-        } else {
-            U::zero()
-        };
-    }
-
-    assert_eq!(row.len(), 1 << k, "Row length must be 2^k");
+    assert_eq!(row.len(), 1 << challenges.len(), "row length must be 2^k");
 
     let mut current: Vec<U> = row.iter().map(|&x| U::from(x)).collect();
-
-    // fold from last to first challenge
-    for &r in challenges.iter().rev() {
+    for &r in challenges {
         let half = current.len() / 2;
-        let one_minus_r = U::one().add(&r); // in gf(2^n): 1-r = 1+r
-
         for i in 0..half {
-            // lagrange contraction: (1-r)*left + r*right
-            current[i] = current[2 * i]
-                .mul(&one_minus_r)
-                .add(&current[2 * i + 1].mul(&r));
+            let (lo, hi) = (current[2 * i], current[2 * i + 1]);
+            current[i] = lo.add(&r.mul(&hi.add(&lo)));
         }
         current.truncate(half);
     }
-
     current[0]
+}
+
+/// Round message of the product sumcheck `Σ_x f(x)·g(x)` on the lsb variable:
+/// `(g(0), g(1), coefficient of X²)` of the univariate round polynomial.
+pub fn product_round_coeffs<F: BinaryFieldElement>(f: &[F], g: &[F]) -> (F, F, F) {
+    debug_assert_eq!(f.len(), g.len());
+    let (mut s0, mut s1, mut s2) = (F::zero(), F::zero(), F::zero());
+    for (fp, gp) in f.chunks_exact(2).zip(g.chunks_exact(2)) {
+        s0 = s0.add(&fp[0].mul(&gp[0]));
+        s1 = s1.add(&fp[1].mul(&gp[1]));
+        s2 = s2.add(&fp[1].add(&fp[0]).mul(&gp[1].add(&gp[0])));
+    }
+    (s0, s1, s2)
+}
+
+/// Evaluate a round polynomial given as `(g(0), g(1), X² coefficient)` at `r`.
+pub fn eval_round_poly<F: BinaryFieldElement>(coeffs: (F, F, F), r: F) -> F {
+    let (s0, s1, s2) = coeffs;
+    // g(X) = s0 + (s0 + s1 + s2)·X + s2·X²   (char 2)
+    let lin = s0.add(&s1).add(&s2);
+    s0.add(&lin.mul(&r)).add(&s2.mul(&r.mul(&r)))
+}
+
+/// Bind the lsb variable of a multilinear table to `r`.
+pub fn fold_lsb<F: BinaryFieldElement>(poly: &[F], r: F) -> Vec<F> {
+    poly.chunks_exact(2)
+        .map(|p| p[0].add(&r.mul(&p[1].add(&p[0]))))
+        .collect()
+}
+
+/// `Σ_i a[i]·b[i]`
+pub fn inner_product<F: BinaryFieldElement>(a: &[F], b: &[F]) -> F {
+    a.iter()
+        .zip(b)
+        .fold(F::zero(), |acc, (x, y)| acc.add(&x.mul(y)))
 }
 
 /// precompute powers of alpha to avoid repeated multiplications
@@ -54,8 +74,13 @@ pub fn precompute_alpha_powers<F: BinaryFieldElement>(alpha: F, n: usize) -> Vec
     alpha_pows
 }
 
-/// full ligerito sumcheck polynomial induction per paper section 6.2
-/// computes batched basis polynomial w̃ℓ for verifier consistency check
+/// Batch the Ligero row checks at `sorted_queries` into one inner-product claim
+/// (paper section 6.2).
+///
+/// Returns `(basis, enforced_sum)` with `basis = Σ_k α^k · G[q_k]` (generator
+/// rows of the length-`2^n` message code) and
+/// `enforced_sum = Σ_k α^k · ⟨row_k, eq(v_challenges)⟩`. For an honest
+/// commitment, `⟨partial_eval(v, v_challenges), basis⟩ = enforced_sum`.
 pub fn induce_sumcheck_poly<T, U>(
     n: usize,
     sks_vks: &[T],
@@ -81,8 +106,7 @@ where
         let contribution = dot.mul(&alpha_pows[i]);
         enforced_sum = enforced_sum.add(&contribution);
 
-        let query_mod = query % (1 << n);
-        let qf = T::from_bits(query_mod as u64);
+        let qf = T::from_bits(query as u64);
 
         // compute scaled basis (clears buffers internally)
         evaluate_scaled_basis_inplace(
@@ -90,19 +114,13 @@ where
             &mut local_basis,
             sks_vks,
             qf,
-            contribution,
+            alpha_pows[i],
         );
 
         for (j, &val) in local_basis.iter().enumerate() {
             basis_poly[j] = basis_poly[j].add(&val);
         }
     }
-
-    debug_assert_eq!(
-        basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x)),
-        enforced_sum,
-        "sumcheck consistency check failed"
-    );
 
     (basis_poly, enforced_sum)
 }
@@ -166,8 +184,7 @@ where
                 let contribution = dot.mul(&alpha_pow);
                 thread_sum = thread_sum.add(&contribution);
 
-                let query_mod = query % (1 << n);
-                let qf = T::from_bits(query_mod as u64);
+                let qf = T::from_bits(query as u64);
 
                 // compute scaled basis (clears buffers internally)
                 evaluate_scaled_basis_inplace(
@@ -175,7 +192,7 @@ where
                     &mut local_basis,
                     &sks_vks,
                     qf,
-                    contribution,
+                    alpha_pow,
                 );
 
                 // accumulate into thread-local basis
@@ -199,12 +216,6 @@ where
         enforced_sum = enforced_sum.add(&thread_sum);
     }
 
-    debug_assert_eq!(
-        basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x)),
-        enforced_sum,
-        "parallel sumcheck consistency failed"
-    );
-
     (basis_poly, enforced_sum)
 }
 
@@ -226,37 +237,63 @@ mod tests {
     }
 
     #[test]
-    fn test_sumcheck_consistency() {
-        // Test that enforced_sum equals sum of basis polynomial
-        let n = 3; // 2^3 = 8 elements
-        let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << n);
+    fn test_tensorized_dot_matches_partial_eval() {
+        let row: Vec<BinaryElem32> = (0..16).map(|i| BinaryElem32::from(i * 7 + 1)).collect();
+        let rs: Vec<BinaryElem128> = (0..4).map(|i| BinaryElem128::from(0x1234 + i)).collect();
+        let mut lifted: Vec<BinaryElem128> = row.iter().map(|&x| x.into()).collect();
+        crate::utils::partial_eval_multilinear(&mut lifted, &rs);
+        assert_eq!(tensorized_dot_product(&row, &rs), lifted[0]);
+    }
 
-        let v_challenges = vec![BinaryElem128::from(0x1234), BinaryElem128::from(0x5678)];
+    /// The Ligero identity the verifier relies on: for an honest commitment of
+    /// `v` laid out as an `m × n` matrix, every encoded row `q ∈ [0, 4m)`
+    /// satisfies `⟨row_q, eq(ρ)⟩ = Enc(partial_eval(v, ρ))[q]`, so the induced
+    /// basis gives `⟨partial_eval(v, ρ), basis⟩ = enforced_sum`.
+    #[cfg(feature = "prover")]
+    #[test]
+    fn test_induced_basis_matches_committed_rows() {
+        fn check<T>(m: usize, n: usize)
+        where
+            T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+            BinaryElem128: From<T>,
+        {
+            type U = BinaryElem128;
+            let log_m = m.trailing_zeros() as usize;
+            let log_n = n.trailing_zeros() as usize;
+            let v: Vec<T> = (0..m * n)
+                .map(|i| T::from_bits((i as u64).wrapping_mul(0x9E37_79B9) ^ 0x5A5A))
+                .collect();
+            let rs = reed_solomon::reed_solomon::<T>(m, 4 * m);
+            let w = crate::ligero::ligero_commit(&v, m, n, &rs);
 
-        let queries = vec![0, 2, 5];
-        let opened_rows = vec![
-            vec![BinaryElem32::from(1); 4],
-            vec![BinaryElem32::from(2); 4],
-            vec![BinaryElem32::from(3); 4],
-        ];
+            let rho: Vec<U> = (0..log_n).map(|i| U::from_bits(0xABCD_0000 + i as u64)).collect();
+            let mut y: Vec<U> = v.iter().map(|&x| U::from(x)).collect();
+            crate::utils::partial_eval_multilinear(&mut y, &rho);
 
-        let alpha = BinaryElem128::from(0x9ABC);
+            // all queries, including q >= m
+            let queries: Vec<usize> = (0..4 * m).collect();
+            let rows: Vec<Vec<T>> = queries.iter().map(|&q| w.mat[q].clone()).collect();
+            let sks_vks: Vec<T> = eval_sk_at_vks(m);
+            let alpha = U::from_bits(0x1357_9BDF);
+            let (basis, sum) = induce_sumcheck_poly(log_m, &sks_vks, &rows, &rho, &queries, alpha);
+            assert_eq!(inner_product(&y, &basis), sum);
 
-        let (basis_poly, enforced_sum) =
-            induce_sumcheck_poly(n, &sks_vks, &opened_rows, &v_challenges, &queries, alpha);
-
-        // Check sum consistency
-        let computed_sum = basis_poly
-            .iter()
-            .fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
-        assert_eq!(computed_sum, enforced_sum, "Sum consistency check failed");
-
-        // The basis polynomial should not be all zeros (unless all inputs are zero)
-        let all_zero = basis_poly.iter().all(|&x| x == BinaryElem128::zero());
-        assert!(
-            !all_zero || alpha == BinaryElem128::zero(),
-            "Basis polynomial should not be all zeros"
-        );
+            // and per row, with no batching
+            let mut sks_x = vec![T::zero(); sks_vks.len()];
+            let mut g = vec![U::zero(); m];
+            for (&q, row) in queries.iter().zip(&rows) {
+                crate::utils::evaluate_scaled_basis_inplace(
+                    &mut sks_x,
+                    &mut g,
+                    &sks_vks,
+                    T::from_bits(q as u64),
+                    U::one(),
+                );
+                assert_eq!(tensorized_dot_product(row, &rho), inner_product(&y, &g), "q={q}");
+            }
+        }
+        check::<BinaryElem32>(64, 16);
+        check::<BinaryElem128>(32, 4);
     }
 
     #[test]
@@ -377,32 +414,5 @@ mod tests {
         // With no inputs, everything should be zero
         assert_eq!(enforced_sum, BinaryElem128::zero());
         assert!(basis_poly.iter().all(|&x| x == BinaryElem128::zero()));
-    }
-
-    #[test]
-    fn test_single_query() {
-        let n = 2; // 2^2 = 4 elements
-        let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << n);
-
-        let v_challenges = vec![BinaryElem128::from(5)];
-        let queries = vec![2]; // Single query at index 2
-                               // Row must have length 2^k where k = number of challenges
-        let opened_rows = vec![vec![BinaryElem32::from(7), BinaryElem32::from(11)]];
-        let alpha = BinaryElem128::from(3);
-
-        let (basis_poly, enforced_sum) =
-            induce_sumcheck_poly(n, &sks_vks, &opened_rows, &v_challenges, &queries, alpha);
-
-        // Check that basis polynomial has the expected structure
-        let basis_sum = basis_poly
-            .iter()
-            .fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
-        assert_eq!(basis_sum, enforced_sum);
-
-        // Basis polynomial sum should equal enforced sum
-        assert!(
-            basis_sum == enforced_sum,
-            "Basis sum should match enforced sum"
-        );
     }
 }

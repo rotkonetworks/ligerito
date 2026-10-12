@@ -77,7 +77,20 @@ pub fn encode_in_place_with_parallel<F: BinaryFieldElement + 'static>(
 }
 
 /// Non-systematic encoding for Ligero
+///
+/// `data[..message_length]` holds coefficients in the (unnormalised) novel
+/// polynomial basis `X_i(x) = Π_{j : bit j of i} s_j(x)`; on return `data[q]`
+/// is the evaluation at the domain point `from_bits(q)`.
 pub fn encode_non_systematic<F: BinaryFieldElement + 'static>(rs: &ReedSolomon<F>, data: &mut [F]) {
+    encode_non_systematic_with_parallel(rs, data, true)
+}
+
+/// Non-systematic encoding with configurable parallelization
+pub fn encode_non_systematic_with_parallel<F: BinaryFieldElement + 'static>(
+    rs: &ReedSolomon<F>,
+    data: &mut [F],
+    parallel: bool,
+) {
     use core::any::TypeId;
     use ligerito_binary_fields::BinaryElem32;
 
@@ -117,10 +130,10 @@ pub fn encode_non_systematic<F: BinaryFieldElement + 'static>(rs: &ReedSolomon<F
                 )
             }
         };
-        crate::fft_gf32::fft_gf32(data_gf32, twiddles_gf32, true);
+        crate::fft_gf32::fft_gf32(data_gf32, twiddles_gf32, parallel);
         return;
     }
 
     // Generic fallback
-    fft::fft(data, &rs.twiddles, true);
+    fft::fft(data, &rs.twiddles, parallel);
 }

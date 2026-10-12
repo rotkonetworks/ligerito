@@ -361,13 +361,138 @@ impl BinaryFieldElement for BinaryElem64 {
     }
 }
 
-// Field embeddings for Ligerito
+// Subfield embeddings.
+//
+// The fields here use unrelated polynomial bases, so copying bits from a
+// smaller field into a larger one is NOT a ring homomorphism. Each
+// `From` below is the genuine embedding φ(Σ aᵢxⁱ) = Σ aᵢγⁱ, where γ is a root
+// of the smaller field's modulus inside the larger field (found by
+// Cantor–Zassenhaus; `test_embeddings_are_homomorphisms` checks them).
+// φ₁₆→₁₂₈ = φ₃₂→₁₂₈ ∘ φ₁₆→₃₂, so conversions commute.
+
+const EMBED_16_IN_32_BASIS: [u32; 16] = [
+    0x1,
+    0xdcbf24b2,
+    0xf491ccf4,
+    0x54da6400,
+    0x61a14d8e,
+    0xecb96800,
+    0x18ebb52f,
+    0xb5c4f88b,
+    0x4164c846,
+    0x831a6455,
+    0x188bc04c,
+    0x4f33263e,
+    0x50a6847a,
+    0x792a7847,
+    0x7a8bf7a3,
+    0x6ae6d059,
+];
+
+const EMBED_32_IN_128_BASIS: [u128; 32] = [
+    0x1,
+    0xc2ad7d2a889a2e625dafe1c0f5fa0b0f,
+    0xa36eb16896346ffdb4f0319a37e37a16,
+    0x2ded3bb0e67b64c08fe95a442f57c746,
+    0x9b81128f5e8c0ca5487bc77f5244124a,
+    0x453b06a6bbba9cae098fcead3a21411f,
+    0x7549d174a93c4b3ba233d944344ca11a,
+    0x106977258f9fcf5780fb672275932851,
+    0x743ad5c2d528fe76cd89f9a02897d4d4,
+    0xf39b97d42ba79c45ea4f46f71a6ffbe5,
+    0x78b4f80e5a1b921e7d3c7cfc7e92f2c1,
+    0x7dad48d6664292573077d59f33e220e5,
+    0xa7fb546b66ccf343f855a2e81758bc29,
+    0xef1668428c4409562407596b1d41c294,
+    0xc70a1808f5fc10d2fe1b2d079f63ecea,
+    0x942926f037c3d59f3da95fa76909463,
+    0xb323f8b46a9ff6353bb57cfe51b6b54a,
+    0x87b2f19ab2f583d4cc57c2ddc6e46f14,
+    0x7dfe742f5dd66a673e3cc29f3bfd39b7,
+    0xaa21950a5d4bd0f3ca22bd3e6b742a76,
+    0xdfb2560b1f907ef4c188e57e1018f99b,
+    0xb7a85c215d1e57ef28e769bc080fd32f,
+    0xc714e02a00f87c33636126394114accc,
+    0x6c95b3decd5217e0972c9fba299fc505,
+    0x83801942bb7e1b11675088db6cc367b3,
+    0x28b3450906ee81627f22db82fde50bca,
+    0x833b8d735c896678e8e96871714ba92d,
+    0xaefd6cc1a76c85aec2d594b4d5e7b9cd,
+    0xefbf2299a29121fe628916b5d3797507,
+    0xe2ff39c69274e0af2ec56f0a9e3b0544,
+    0x744a23790407126f178583b2f32fc242,
+    0x54391c6205f7edcab410f02f4eee7a8d,
+];
+
+const EMBED_16_IN_128_BASIS: [u128; 16] = [
+    0x1,
+    0x9e1723a53bc326755304e1b0b798bb58,
+    0x7da98df94ab991f5fd67f3d95323e2d0,
+    0x11c665b8e43898730975d6f878ae17e7,
+    0x9745e973bc195b0e42fa7e6313a877c1,
+    0xa7760bb9cf936f32c2d393193ddcd37d,
+    0x87efaf7735c02fabb132feb567dfbd8e,
+    0x8b9c7bf0d9ad907a0ecd5861326456e6,
+    0x5de72d989819fdbd73b5e20fc14e6bca,
+    0x102588650a6ef99392071edacf1bbff5,
+    0x86e5b069627d7b2f9e5b14c1162c9d24,
+    0x589979c7388d8569af70fe63b577608b,
+    0x8fc1820ca275a4f887cbe1577259af68,
+    0x288c04d554f43b7d898cfa38f21b9882,
+    0xe32e3eebd9303f281360e106561e8caf,
+    0x5c089f50c9e1de153a432d996f7f29f3,
+];
+
+/// Byte-sliced lookup tables for a GF(2)-linear map given by basis images.
+const fn byte_tables_u128<const B: usize, const N: usize>(basis: &[u128; N]) -> [[u128; 256]; B] {
+    let mut out = [[0u128; 256]; B];
+    let mut byte = 0;
+    while byte < B {
+        let mut v: usize = 1;
+        while v < 256 {
+            // v = lowbit + rest, both already filled
+            let low = v & v.wrapping_neg();
+            let bit = low.trailing_zeros() as usize;
+            out[byte][v] = out[byte][v ^ low] ^ basis[byte * 8 + bit];
+            v += 1;
+        }
+        byte += 1;
+    }
+    out
+}
+
+const fn byte_tables_u32<const B: usize, const N: usize>(basis: &[u32; N]) -> [[u32; 256]; B] {
+    let mut out = [[0u32; 256]; B];
+    let mut byte = 0;
+    while byte < B {
+        let mut v: usize = 1;
+        while v < 256 {
+            let low = v & v.wrapping_neg();
+            let bit = low.trailing_zeros() as usize;
+            out[byte][v] = out[byte][v ^ low] ^ basis[byte * 8 + bit];
+            v += 1;
+        }
+        byte += 1;
+    }
+    out
+}
+
+static EMBED_32_IN_128: [[u128; 256]; 4] = byte_tables_u128(&EMBED_32_IN_128_BASIS);
+static EMBED_16_IN_128: [[u128; 256]; 2] = byte_tables_u128(&EMBED_16_IN_128_BASIS);
+static EMBED_16_IN_32: [[u32; 256]; 2] = byte_tables_u32(&EMBED_16_IN_32_BASIS);
+
 impl From<BinaryElem16> for BinaryElem32 {
+    #[inline]
     fn from(elem: BinaryElem16) -> Self {
-        BinaryElem32::from(elem.0.value() as u32)
+        let v = elem.0.value();
+        BinaryElem32::from(
+            EMBED_16_IN_32[0][(v & 0xff) as usize] ^ EMBED_16_IN_32[1][(v >> 8) as usize],
+        )
     }
 }
 
+/// Bit copy, NOT a field embedding: `BinaryElem64` multiplication is a
+/// truncated carry-less product, so it is not a field.
 impl From<BinaryElem16> for BinaryElem64 {
     fn from(elem: BinaryElem16) -> Self {
         BinaryElem64(BinaryPoly64::new(elem.0.value() as u64))
@@ -375,11 +500,16 @@ impl From<BinaryElem16> for BinaryElem64 {
 }
 
 impl From<BinaryElem16> for BinaryElem128 {
+    #[inline]
     fn from(elem: BinaryElem16) -> Self {
-        BinaryElem128::from(elem.0.value() as u128)
+        let v = elem.0.value();
+        BinaryElem128::from_value(
+            EMBED_16_IN_128[0][(v & 0xff) as usize] ^ EMBED_16_IN_128[1][(v >> 8) as usize],
+        )
     }
 }
 
+/// Bit copy, NOT a field embedding (see `From<BinaryElem16> for BinaryElem64`).
 impl From<BinaryElem32> for BinaryElem64 {
     fn from(elem: BinaryElem32) -> Self {
         BinaryElem64(BinaryPoly64::new(elem.0.value() as u64))
@@ -387,11 +517,19 @@ impl From<BinaryElem32> for BinaryElem64 {
 }
 
 impl From<BinaryElem32> for BinaryElem128 {
+    #[inline]
     fn from(elem: BinaryElem32) -> Self {
-        BinaryElem128::from(elem.0.value() as u128)
+        let v = elem.0.value();
+        BinaryElem128::from_value(
+            EMBED_32_IN_128[0][(v & 0xff) as usize]
+                ^ EMBED_32_IN_128[1][((v >> 8) & 0xff) as usize]
+                ^ EMBED_32_IN_128[2][((v >> 16) & 0xff) as usize]
+                ^ EMBED_32_IN_128[3][(v >> 24) as usize],
+        )
     }
 }
 
+/// Bit copy, NOT a field embedding (see `From<BinaryElem16> for BinaryElem64`).
 impl From<BinaryElem64> for BinaryElem128 {
     fn from(elem: BinaryElem64) -> Self {
         BinaryElem128::from(elem.0.value() as u128)

@@ -183,7 +183,7 @@ pub use sumcheck_verifier::SumcheckError;
 pub use transcript::{FiatShamir, Sha256Transcript, Transcript, TranscriptType};
 pub use verifier::{
     verify, verify_complete, verify_complete_sha256, verify_debug, verify_sha256,
-    verify_with_evaluations, verify_with_transcript, EvalVerifyResult,
+    verify_with_evaluations, verify_with_transcript,
 };
 
 #[cfg(feature = "postcard-serde")]

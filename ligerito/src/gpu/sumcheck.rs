@@ -434,8 +434,7 @@ impl GpuSumcheck {
         {
             enforced_sum = enforced_sum.add(&contribution);
 
-            let query_mod = query % basis_size;
-            let qf = T::from_bits(query_mod as u64);
+            let qf = T::from_bits(query as u64);
 
             // Compute scaled basis (reuses buffers!)
             evaluate_scaled_basis_inplace(

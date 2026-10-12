@@ -51,7 +51,44 @@ impl<T: BinaryFieldElement, U: BinaryFieldElement> ProverConfig<T, U> {
             #[cfg(not(feature = "std"))]
             return Err(crate::LigeritoError::InvalidConfig);
         }
+        let shape_ok = self.initial_dims.1 == 1 << self.initial_k
+            && self.recursive_steps >= 1
+            && self.dims.len() == self.recursive_steps
+            && self.ks.len() == self.recursive_steps
+            && self.reed_solomon_codes.len() == self.recursive_steps
+            && self.initial_reed_solomon.message_length() == self.initial_dims.0
+            && self.verifier_config().is_well_formed()
+            && self
+                .dims
+                .iter()
+                .zip(&self.ks)
+                .zip(&self.reed_solomon_codes)
+                .all(|((&(m, n), &k), rs)| n == 1 << k && rs.message_length() == m && m.is_power_of_two());
+        if !shape_ok {
+            #[cfg(feature = "std")]
+            return Err(crate::LigeritoError::InvalidConfig(
+                "inconsistent dims / ks / reed-solomon codes".into(),
+            ));
+            #[cfg(not(feature = "std"))]
+            return Err(crate::LigeritoError::InvalidConfig);
+        }
         Ok(())
+    }
+
+    /// The verifier configuration matching this prover configuration.
+    pub fn verifier_config(&self) -> VerifierConfig {
+        VerifierConfig {
+            recursive_steps: self.recursive_steps,
+            initial_dim: self.initial_dims.0.trailing_zeros() as usize,
+            log_dims: self
+                .dims
+                .iter()
+                .map(|&(m, _)| m.trailing_zeros() as usize)
+                .collect(),
+            initial_k: self.initial_k,
+            ks: self.ks.clone(),
+            num_queries: self.num_queries,
+        }
     }
 }
 
@@ -72,6 +109,42 @@ impl VerifierConfig {
     /// This is the number of sumcheck rounds needed for evaluation proofs.
     pub fn poly_log_size(&self) -> usize {
         self.initial_dim + self.initial_k
+    }
+
+    /// Dimensions chain correctly: each round's message length equals the
+    /// previous round's folded length.
+    pub fn is_well_formed(&self) -> bool {
+        self.recursive_steps >= 1
+            && self.num_queries > 0
+            && self.log_dims.len() == self.recursive_steps
+            && self.ks.len() == self.recursive_steps
+            && self.poly_log_size() < usize::BITS as usize - 2
+            && (0..self.recursive_steps).all(|i| {
+                let prev = if i == 0 {
+                    self.initial_dim
+                } else {
+                    self.log_dims[i - 1]
+                };
+                prev == self.log_dims[i] + self.ks[i]
+            })
+    }
+
+    /// Bind the public parameters into the Fiat-Shamir transcript.
+    pub(crate) fn absorb_into(&self, fs: &mut impl crate::transcript::Transcript) {
+        let mut header = Vec::with_capacity(4 * (4 + 2 * self.recursive_steps));
+        for v in [
+            self.initial_dim,
+            self.initial_k,
+            self.recursive_steps,
+            self.num_queries,
+        ]
+        .into_iter()
+        .chain(self.log_dims.iter().copied())
+        .chain(self.ks.iter().copied())
+        {
+            header.extend_from_slice(&(v as u32).to_le_bytes());
+        }
+        fs.absorb_bytes(b"ligerito-v1-config", &header);
     }
 }
 

@@ -16,7 +16,10 @@ mod encode;
 mod fft;
 mod fft_gf32;
 
-pub use encode::{encode, encode_in_place, encode_in_place_with_parallel, encode_non_systematic};
+pub use encode::{
+    encode, encode_in_place, encode_in_place_with_parallel, encode_non_systematic,
+    encode_non_systematic_with_parallel,
+};
 pub use fft::{compute_twiddles, fft, ifft};
 pub use fft_gf32::{fft_gf32, ifft_gf32};
 

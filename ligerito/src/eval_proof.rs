@@ -50,6 +50,51 @@ impl<U: BinaryFieldElement> EvalSumcheckRound<U> {
     }
 }
 
+/// Bind the evaluation claims into the transcript (always called, so a proof
+/// without claims cannot be replayed as one with claims or vice versa).
+pub(crate) fn absorb_claims<T: BinaryFieldElement>(
+    fs: &mut impl crate::transcript::Transcript,
+    claims: &[EvalClaim<T>],
+) {
+    fs.absorb_bytes(b"ligerito-v1-claims", &(claims.len() as u64).to_le_bytes());
+    for c in claims {
+        fs.absorb_bytes(b"ligerito-v1-claim-index", &(c.index as u64).to_le_bytes());
+        fs.absorb_elem(c.value);
+    }
+}
+
+/// `Q(ρ, ·)` for `Q = Σ_k α_k · eq(z_k, ·)` with the low `ρ.len()` variables
+/// bound to `ρ`: a table of length `m` (the remaining high variables), with
+/// claim `k` contributing `α_k · eq(z_k mod 2^|ρ|, ρ)` at `z_k >> |ρ|`.
+///
+/// Callers must ensure every `index < m · 2^|ρ|`.
+pub(crate) fn folded_batched_eq<T, U>(
+    claims: &[EvalClaim<T>],
+    alphas: &[U],
+    rho: &[U],
+    m: usize,
+) -> Vec<U>
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement,
+{
+    let k = rho.len();
+    let mut table = vec![U::zero(); m];
+    for (claim, &alpha) in claims.iter().zip(alphas) {
+        let mut w = alpha;
+        for (i, &r) in rho.iter().enumerate() {
+            w = w.mul(&if (claim.index >> i) & 1 == 1 {
+                r
+            } else {
+                U::one().add(&r)
+            });
+        }
+        let slot = &mut table[claim.index >> k];
+        *slot = slot.add(&w);
+    }
+    table
+}
+
 /// Compute the batched eq table: Q[j] = Σ_k α_k · eq(z_k, j)
 /// where j ranges over [0, N) and z_k is the binary representation of claim indices.
 ///

@@ -194,6 +194,31 @@ mod tests {
 
 #[cfg(test)]
 mod julia_compatibility_tests {
+    #[test]
+    fn test_embeddings_are_homomorphisms() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        assert_eq!(BinaryElem128::from(BinaryElem32::one()), BinaryElem128::one());
+        assert_eq!(BinaryElem128::from(BinaryElem16::one()), BinaryElem128::one());
+        assert_eq!(BinaryElem32::from(BinaryElem16::one()), BinaryElem32::one());
+        for _ in 0..1000 {
+            let (a, b) = (BinaryElem32::from(next() as u32), BinaryElem32::from(next() as u32));
+            let (ua, ub) = (BinaryElem128::from(a), BinaryElem128::from(b));
+            assert_eq!(BinaryElem128::from(a.mul(&b)), ua.mul(&ub));
+            assert_eq!(BinaryElem128::from(a.add(&b)), ua.add(&ub));
+
+            let (c, d) = (BinaryElem16::from(next() as u16), BinaryElem16::from(next() as u16));
+            assert_eq!(BinaryElem32::from(c.mul(&d)), BinaryElem32::from(c).mul(&BinaryElem32::from(d)));
+            assert_eq!(BinaryElem128::from(c.mul(&d)), BinaryElem128::from(c).mul(&BinaryElem128::from(d)));
+            assert_eq!(BinaryElem128::from(c), BinaryElem128::from(BinaryElem32::from(c)));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -284,8 +309,9 @@ mod julia_compatibility_tests {
         let elem64: BinaryElem64 = elem16.into();
         let elem128: BinaryElem128 = elem16.into();
 
-        assert_eq!(elem32.poly().value() & 0xFFFF, 0x1234);
-        assert_eq!(elem64.poly().value() & 0xFFFF, 0x1234);
-        assert_eq!(elem128.poly().value() & 0xFFFF, 0x1234);
+        // 16→32 and 16→128 are field embeddings (not bit copies) and commute;
+        // 16→64 stays a bit copy since BinaryElem64 is not a field
+        assert_eq!(elem128, BinaryElem128::from(elem32));
+        assert_eq!(elem64.poly().value(), 0x1234);
     }
 }
