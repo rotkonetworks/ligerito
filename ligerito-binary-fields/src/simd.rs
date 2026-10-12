@@ -625,9 +625,9 @@ unsafe fn fft_butterfly_gf32_avx512_impl(
         // This gives us: lambda*w[0], lambda*w[2], lambda*w[4], lambda*w[6]
         let prod_even = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x00);
 
-        // VPCLMULQDQ selector 0x01: multiply low of first operand with high of second
+        // VPCLMULQDQ selector 0x10: low qword of the first operand × high qword of the second
         // This gives us: lambda*w[1], lambda*w[3], lambda*w[5], lambda*w[7]
-        let prod_odd = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x01);
+        let prod_odd = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x10);
 
         // Extract 256-bit halves using _mm512_extracti64x4_epi64 (Rust 1.89+)
         let prod_even_lo: __m256i = _mm512_extracti64x4_epi64::<0>(prod_even);
@@ -732,7 +732,7 @@ unsafe fn fft_butterfly_gf32_avx2_impl(
 
         // Selector 0x01: multiply low of first with high of second
         // Gives: lambda*w[1], lambda*w[3]
-        let prod_odd = _mm256_clmulepi64_epi128(lambda_256, w_256, 0x01);
+        let prod_odd = _mm256_clmulepi64_epi128(lambda_256, w_256, 0x10);
 
         // Extract products
         let p0 = _mm256_extract_epi64::<0>(prod_even) as u64;
@@ -877,27 +877,12 @@ pub fn fft_butterfly_gf32_sse(
     }
 }
 
-/// reduce 64-bit product modulo GF(2^32) irreducible
-/// optimized branchless reduction for GF(2^32)
+/// reduce 64-bit product modulo the GF(2^32) irreducible
+/// x^32 + x^15 + x^9 + x^7 + x^4 + x^3 + 1
 #[inline(always)]
 fn reduce_gf32(p: u64, _irr: u64) -> u64 {
-    // for 32x32 -> 64 multiplication, we need to reduce bits [63:32]
-    // unrolled reduction: process high 32 bits in chunks
-
-    let hi = (p >> 32);
-    let lo = (p & 0xFFFFFFFF);
-
-    // compute tmp by shifting high bits down
-    // for irreducible 0b1_0000_1000_1001_1000_1001 (x^32 + x^15 + x^9 + x^7 + x^3 + 1)
-    // bits set at positions: 0,3,7,9,15 -> shifts needed: 32,29,25,23,17
-    let tmp = hi
-        ^ (hi >> 29)  // bit 15: shift by (32-3)
-        ^ (hi >> 25)  // bit 9: shift by (32-7)
-        ^ (hi >> 23)  // bit 7: shift by (32-9)
-        ^ (hi >> 17); // bit 3: shift by (32-15)
-
-    // XOR with low bits and shifted tmp
-    lo ^ tmp ^ (tmp << 3) ^ (tmp << 7) ^ (tmp << 9) ^ (tmp << 15)
+    // previously omitted the x^4 term, so every SSE butterfly was wrong
+    reduce_gf32_inline(p)
 }
 
 /// scalar fallback for FFT butterfly
