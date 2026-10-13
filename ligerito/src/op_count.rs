@@ -1,6 +1,7 @@
 //! Operation counters (feature `op-count`): field multiplications and
 //! inversions, row hashes, and Merkle leaf/node hashes, for auditing what a
-//! verifier costs (e.g. an on-chain budget).
+//! verifier costs (e.g. an on-chain budget). Needs 64-bit atomics, so it does
+//! not build on targets without them (e.g. PolkaVM); it is opt-in.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 

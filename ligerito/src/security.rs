@@ -128,18 +128,26 @@ fn union_bits(bits: &[f64]) -> f64 {
 }
 
 #[cfg(feature = "std")]
-/// `-log2(x / |F|)`.
-fn over_field(x: f64) -> f64 {
+/// `-log2(x / |F|)` for a challenge set of `2^field_bits` elements.
+fn over_field(x: f64, field_bits: u32) -> f64 {
     if x <= 0.0 {
         f64::INFINITY
     } else {
-        CHALLENGE_FIELD_BITS as f64 - x.log2()
+        field_bits as f64 - x.log2()
     }
 }
 
 #[cfg(feature = "std")]
 /// Accounting for `config` (assumed well formed).
 pub fn analyze(config: &VerifierConfig) -> SecurityReport {
+    analyze_with_challenge_bits(config, CHALLENGE_FIELD_BITS)
+}
+
+/// [`analyze`] with challenges drawn from a set of `2^bits` elements — e.g.
+/// 64 to assess transcripts that only filled the low half of each GF(2^128)
+/// challenge (SHA-256 and BLAKE2b transcripts before 0.8).
+#[cfg(feature = "std")]
+pub fn analyze_with_challenge_bits(config: &VerifierConfig, bits: u32) -> SecurityReport {
     let rho = (-(LOG_INV_RATE as f64)).exp2();
     let delta = 1.0 - rho;
     let per_query = -(1.0 - delta / 2.0).log2();
@@ -162,10 +170,10 @@ pub fn analyze(config: &VerifierConfig) -> SecurityReport {
             log_columns: k,
             queries: q,
             query_bits: if q as f64 >= n { f64::INFINITY } else { q as f64 * per_query },
-            proximity_gap_bits: over_field(k as f64 * n),
-            row_batching_bits: over_field(q as f64 - 1.0),
-            sumcheck_bits: over_field(2.0 * sumcheck_rounds as f64),
-            glue_bits: if t == 0 { f64::INFINITY } else { over_field(1.0) },
+            proximity_gap_bits: over_field(k as f64 * n, bits),
+            row_batching_bits: over_field(q as f64 - 1.0, bits),
+            sumcheck_bits: over_field(2.0 * sumcheck_rounds as f64, bits),
+            glue_bits: if t == 0 { f64::INFINITY } else { over_field(1.0, bits) },
         });
     }
     SecurityReport {
@@ -218,6 +226,20 @@ mod tests {
             assert_eq!(queries_for_100_bits(log_inv_rate), Some(q));
         }
         assert_eq!(queries_for_100_bits(0), None);
+    }
+
+    /// The pre-0.8 SHA-256/BLAKE2b transcripts drew 64-bit challenges.
+    #[test]
+    fn half_width_challenges_report() {
+        for (name, cfg) in [
+            ("20", crate::hardcoded_config_20_verifier()),
+            ("24", crate::hardcoded_config_24_verifier()),
+            ("30", crate::hardcoded_config_30_verifier()),
+        ] {
+            let r = analyze_with_challenge_bits(&cfg, 64);
+            std::println!("config {name}, 64-bit challenges\n{r}\n");
+            assert!(r.total_bits() < 50.0);
+        }
     }
 
     #[test]

@@ -67,7 +67,8 @@ pub trait Transcript {
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> alloc::vec::Vec<usize>;
 }
 
-/// A field element from its little-endian bit representation.
+/// A field element from its little-endian bit representation (on the
+/// little-endian targets this crate supports, like `hash_row`).
 ///
 /// Every `BinaryFieldElement` is `repr(transparent)` over an unsigned
 /// integer whose bits are the polynomial-basis coefficients, so any byte
