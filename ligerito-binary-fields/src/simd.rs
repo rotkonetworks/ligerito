@@ -1156,6 +1156,10 @@ pub fn fft_butterfly_gf32_fast(u: &mut [BinaryElem32], w: &mut [BinaryElem32], l
         unsafe { butterfly_sse(u, w, lambda) };
         return;
     }
+    #[cfg(all(feature = "hardware-accel", target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        return fft_butterfly_gf32_wasm_simd(u, w, lambda);
+    }
     #[allow(unreachable_code)]
     fft_butterfly_gf32_scalar(u, w, lambda)
 }

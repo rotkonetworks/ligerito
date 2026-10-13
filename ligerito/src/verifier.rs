@@ -100,11 +100,18 @@ impl<U: BinaryFieldElement> FactoredBasis<U> {
         }
     }
 
-    fn inner(&self, y: &[U]) -> U {
-        let rows = self
-            .rows
-            .iter()
-            .fold(U::zero(), |acc, (c, a, off)| acc.add(&c.mul(&tensor_inner(y, &a[*off..]))));
+    fn inner(&self, y: &[U]) -> U
+    where
+        U: Send + Sync,
+    {
+        let term = |(c, a, off): &(U, Vec<U>, usize)| c.mul(&tensor_inner(y, &a[*off..]));
+        #[cfg(feature = "parallel")]
+        let rows = {
+            use rayon::prelude::*;
+            self.rows.par_iter().map(term).reduce(U::zero, |x, z| x.add(&z))
+        };
+        #[cfg(not(feature = "parallel"))]
+        let rows = self.rows.iter().map(term).fold(U::zero(), |x, z| x.add(&z));
         self.sparse
             .iter()
             .fold(rows, |acc, &(i, w)| acc.add(&w.mul(&y[i])))
@@ -309,11 +316,19 @@ where
             // every opened row of the final commitment must agree with yr:
             // ⟨row_q, eq(rs)⟩ = Enc(yr)[q] = ⟨yr, ⊗_j (1, s_j(ω_q))⟩
             let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
-            for (&q, row) in queries.iter().zip(&fin.opened_rows) {
+            let row_ok = |(&q, row): (&usize, &Vec<U>)| {
                 let a = subspace_evals(U::from_bits(q as u64), config.log_dims[i], &sks_vks);
-                if tensorized_dot_product(row, &rs) != tensor_inner(&fin.yr, &a) {
-                    return Ok(false);
-                }
+                tensorized_dot_product(row, &rs) == tensor_inner(&fin.yr, &a)
+            };
+            #[cfg(feature = "parallel")]
+            let all_ok = {
+                use rayon::prelude::*;
+                queries.par_iter().zip(fin.opened_rows.par_iter()).all(row_ok)
+            };
+            #[cfg(not(feature = "parallel"))]
+            let all_ok = queries.iter().zip(&fin.opened_rows).all(row_ok);
+            if !all_ok {
+                return Ok(false);
             }
             return Ok(true);
         }
