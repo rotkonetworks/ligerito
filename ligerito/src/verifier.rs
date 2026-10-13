@@ -702,12 +702,8 @@ mod tests {
             cols: usize,
             rnd: &mut impl FnMut() -> u64,
         ) -> RecursiveLigeroWitness<F> {
-            let mat: Vec<Vec<F>> = (0..rows)
-                .map(|_| (0..cols).map(|_| F::from_bits(rnd())).collect())
-                .collect();
-            let hashes: Vec<Hash> = mat.iter().map(|r| hash_row(r)).collect();
-            let tree = merkle_tree::build_merkle_tree(&hashes);
-            RecursiveLigeroWitness { mat, tree }
+            let data: Vec<F> = (0..rows * cols).map(|_| F::from_bits(rnd())).collect();
+            RecursiveLigeroWitness::from_columns(data, cols)
         }
 
         let pc = hardcoded_config_12(PhantomData::<T>, PhantomData::<U>);
@@ -725,9 +721,9 @@ mod tests {
         let cm1 = RecursiveLigeroCommitment { root: w1.tree.get_root() };
         fs.absorb_root(&cm1.root);
 
-        let queries = fs.get_distinct_queries(w0.mat.len(), vc.num_queries);
+        let queries = fs.get_distinct_queries(w0.num_rows(), vc.num_queries);
         let alpha = fs.get_challenge::<U>();
-        let rows: Vec<Vec<T>> = queries.iter().map(|&q| w0.mat[q].clone()).collect();
+        let rows: Vec<Vec<T>> = queries.iter().map(|&q| w0.row(q)).collect();
         let sks: Vec<T> = eval_sk_at_vks(1 << vc.initial_dim);
         let (mut basis, mut sum) =
             induce_sumcheck_poly(vc.initial_dim, &sks, &rows, &rho0, &queries, alpha);
@@ -749,7 +745,7 @@ mod tests {
             transcript.push(c);
         }
         fs.absorb_elems(&v);
-        let fq = fs.get_distinct_queries(w1.mat.len(), vc.num_queries);
+        let fq = fs.get_distinct_queries(w1.num_rows(), vc.num_queries);
 
         let mut proof = LigeritoProof::<T, U>::new();
         proof.initial_ligero_cm = Some(cm0);
@@ -760,7 +756,7 @@ mod tests {
         proof.recursive_commitments.push(cm1);
         proof.final_ligero_proof = Some(FinalLigeroProof {
             yr: v,
-            opened_rows: fq.iter().map(|&q| w1.mat[q].clone()).collect(),
+            opened_rows: fq.iter().map(|&q| w1.row(q)).collect(),
             merkle_proof: w1.tree.prove(&fq),
         });
         proof.sumcheck_transcript = Some(SumcheckTranscript { transcript });

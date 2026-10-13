@@ -84,6 +84,8 @@ pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     hasher.finalize().into()
 }
 
+/// Commit to `poly` laid out as an `m × n` message matrix (see `poly2mat`):
+/// RS-encode every column to length `4m` and Merkle-commit the rows.
 #[cfg(feature = "prover")]
 pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly: &[F],
@@ -91,22 +93,90 @@ pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'stat
     n: usize,
     rs: &ReedSolomon<F>,
 ) -> RecursiveLigeroWitness<F> {
-    let mut poly_mat = poly2mat(poly, m, n, 4);
+    assert_eq!(poly.len(), m * n, "poly length must equal m * n");
+    let block = rs.block_length();
+    assert_eq!(rs.message_length(), m);
 
-    // Direct call - no backend abstraction overhead
-    encode_cols(&mut poly_mat, rs, true);
+    // Column-major buffer; the parity region stays zero before encoding.
+    // zeroed_vec gets zero pages from the allocator instead of writing the
+    // whole buffer up front (F is Pod, so all-zero bits is F::zero()).
+    let mut cols: Vec<F> = bytemuck::zeroed_vec(n * block);
 
-    // Parallelize row hashing
+    // Fill: tiles of message rows in parallel. Each tile reads its rows
+    // contiguously and writes a disjoint range of every column.
+    const ROWS_PER_TILE: usize = 4096;
+    struct ColsPtr<F>(*mut F);
+    // SAFETY: tiles write disjoint index sets (row range × all columns)
+    unsafe impl<F> Send for ColsPtr<F> {}
+    unsafe impl<F> Sync for ColsPtr<F> {}
+    let dst = ColsPtr(cols.as_mut_ptr());
+    let fill_tile = |(t, tile): (usize, &[F])| {
+        let r0 = t * ROWS_PER_TILE;
+        let p = &dst;
+        for (i, row) in tile.chunks_exact(n).enumerate() {
+            for (c, &v) in row.iter().enumerate() {
+                // SAFETY: c * block + r0 + i < n * block, unique per (tile, i, c)
+                unsafe { *p.0.add(c * block + r0 + i) = v };
+            }
+        }
+    };
     #[cfg(feature = "parallel")]
-    let hashed_rows: Vec<Hash> = poly_mat.par_iter().map(|row| hash_row(row)).collect();
-
+    poly.par_chunks(ROWS_PER_TILE * n).enumerate().for_each(fill_tile);
     #[cfg(not(feature = "parallel"))]
-    let hashed_rows: Vec<Hash> = poly_mat.iter().map(|row| hash_row(row)).collect();
+    poly.chunks(ROWS_PER_TILE * n).enumerate().for_each(fill_tile);
 
-    let tree = build_merkle_tree(&hashed_rows);
+    // Encode: one task per column; with fewer columns than threads, let each
+    // column's FFT fork as well.
+    #[cfg(feature = "parallel")]
+    {
+        let inner = n < rayon::current_num_threads();
+        cols.par_chunks_mut(block)
+            .for_each(|col| reed_solomon::encode_non_systematic_with_parallel(rs, col, inner));
+    }
+    #[cfg(not(feature = "parallel"))]
+    for col in cols.chunks_mut(block) {
+        reed_solomon::encode_non_systematic_with_parallel(rs, col, false);
+    }
 
-    RecursiveLigeroWitness {
-        mat: poly_mat,
-        tree,
+    RecursiveLigeroWitness::from_columns(cols, n)
+}
+
+#[cfg(feature = "prover")]
+impl<F: BinaryFieldElement + Send + Sync + bytemuck::Pod> RecursiveLigeroWitness<F> {
+    /// Merkle-commit the rows of a column-major matrix with `num_cols` columns.
+    pub fn from_columns(cols: Vec<F>, num_cols: usize) -> Self {
+        assert!(num_cols > 0 && cols.len() % num_cols == 0);
+        let num_rows = cols.len() / num_cols;
+
+        // Hash rows in tiles: gather a tile of rows into a small buffer
+        // (contiguous reads from every column), then hash each row.
+        const TILE: usize = 256;
+        let hash_tile = |(t, out): (usize, &mut [Hash])| {
+            let r0 = t * TILE;
+            let rows = out.len();
+            let mut buf = vec![F::zero(); rows * num_cols];
+            for c in 0..num_cols {
+                let col = &cols[c * num_rows + r0..c * num_rows + r0 + rows];
+                for (i, &v) in col.iter().enumerate() {
+                    buf[i * num_cols + c] = v;
+                }
+            }
+            for (h, row) in out.iter_mut().zip(buf.chunks_exact(num_cols)) {
+                *h = hash_row(row);
+            }
+        };
+        let mut hashes = vec![Hash::default(); num_rows];
+        #[cfg(feature = "parallel")]
+        hashes.par_chunks_mut(TILE).enumerate().for_each(hash_tile);
+        #[cfg(not(feature = "parallel"))]
+        hashes.chunks_mut(TILE).enumerate().for_each(hash_tile);
+
+        let tree = build_merkle_tree(&hashes);
+        RecursiveLigeroWitness {
+            cols,
+            num_rows,
+            num_cols,
+            tree,
+        }
     }
 }

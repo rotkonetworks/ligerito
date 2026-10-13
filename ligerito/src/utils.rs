@@ -149,6 +149,48 @@ pub fn partial_eval_multilinear<F: BinaryFieldElement>(poly: &mut Vec<F>, evals:
     poly.truncate(n);
 }
 
+/// `eq(ρ, c)` for all `c ∈ [0, 2^|ρ|)`, with `ρ_0` on the lsb of `c`.
+pub fn eq_table_lsb<F: BinaryFieldElement>(rho: &[F]) -> Vec<F> {
+    let mut e = vec![F::zero(); 1 << rho.len()];
+    e[0] = F::one();
+    for (j, &r) in rho.iter().enumerate() {
+        let half = 1 << j;
+        let one_r = F::one().add(&r);
+        for i in 0..half {
+            e[half + i] = e[i].mul(&r);
+            e[i] = e[i].mul(&one_r);
+        }
+    }
+    e
+}
+
+/// `partial_eval_multilinear(lift(poly), rho)` without materialising the
+/// lifted polynomial: output `i` is `⟨poly[i·n .. (i+1)·n], eq(ρ, ·)⟩` with
+/// `n = 2^|ρ|`. Parallel over outputs with the `parallel` feature.
+pub fn partial_eval_lift<T, U>(poly: &[T], rho: &[U]) -> Vec<U>
+where
+    T: BinaryFieldElement + Send + Sync,
+    U: BinaryFieldElement + From<T> + Send + Sync,
+{
+    let n = 1usize << rho.len();
+    assert_eq!(poly.len() % n, 0);
+    let eq = eq_table_lsb(rho);
+    let row = |r: &[T]| {
+        r.iter()
+            .zip(&eq)
+            .fold(U::zero(), |acc, (&t, e)| acc.add(&U::from(t).mul(e)))
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        poly.par_chunks_exact(n).map(row).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        poly.chunks_exact(n).map(row).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +234,15 @@ mod tests {
         assert!(is_power_of_two(1024));
         assert!(!is_power_of_two(0));
         assert!(!is_power_of_two(1023));
+    }
+
+    #[test]
+    fn test_partial_eval_lift_matches_fold() {
+        let poly: Vec<BinaryElem32> = (0..1024u32).map(|i| BinaryElem32::from(i.wrapping_mul(2654435761))).collect();
+        let rho: Vec<BinaryElem128> = (0..5).map(|i| BinaryElem128::from_bits(0xABC + i)).collect();
+        let mut lifted: Vec<BinaryElem128> = poly.iter().map(|&x| x.into()).collect();
+        partial_eval_multilinear(&mut lifted, &rho);
+        assert_eq!(partial_eval_lift(&poly, &rho), lifted);
     }
 
     #[test]

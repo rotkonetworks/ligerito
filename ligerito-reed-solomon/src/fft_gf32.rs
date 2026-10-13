@@ -9,8 +9,8 @@ use ligerito_binary_fields::BinaryElem32;
 #[inline(always)]
 fn fft_mul_simd(v: &mut [BinaryElem32], lambda: BinaryElem32) {
     let (u, w) = v.split_at_mut(v.len() / 2);
-    // Use the generic fft_butterfly_gf32 which internally dispatches to the best implementation
-    ligerito_binary_fields::simd::fft_butterfly_gf32(u, w, lambda);
+    // implementation chosen at compile time (no per-call feature detection)
+    ligerito_binary_fields::simd::fft_butterfly_gf32_fast(u, w, lambda);
 }
 
 /// Monomorphic recursive FFT for GF(2^32) with SIMD

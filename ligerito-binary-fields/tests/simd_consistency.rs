@@ -60,6 +60,7 @@ fn fft_butterfly_tiers_match_definition() {
     let has_avx512 = has_avx2 && is_x86_feature_detected!("avx512f");
     let mut tiers: Vec<(&str, fn(&mut [F], &mut [F], F))> = vec![
         ("dispatch", simd::fft_butterfly_gf32),
+        ("fast", simd::fft_butterfly_gf32_fast),
         ("sse", simd::fft_butterfly_gf32_sse),
         ("scalar", simd::fft_butterfly_gf32_scalar),
     ];

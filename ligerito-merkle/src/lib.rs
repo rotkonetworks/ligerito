@@ -89,8 +89,7 @@ pub fn build_merkle_tree<T: Pod + Send + Sync>(leaves: &[T]) -> CompleteMerkleTr
         }
     };
 
-    let mut layers = vec![current_layer.clone()];
-
+    let mut layers = Vec::with_capacity(leaves.len().trailing_zeros() as usize + 1);
     while current_layer.len() > 1 {
         // parallelize sibling hashing for larger layers only to avoid thread overhead (when parallel feature is enabled)
         let next_layer: Vec<Hash> = {
@@ -117,9 +116,9 @@ pub fn build_merkle_tree<T: Pod + Send + Sync>(leaves: &[T]) -> CompleteMerkleTr
             }
         };
 
-        layers.push(next_layer.clone());
-        current_layer = next_layer;
+        layers.push(core::mem::replace(&mut current_layer, next_layer));
     }
+    layers.push(current_layer);
 
     CompleteMerkleTree { layers }
 }

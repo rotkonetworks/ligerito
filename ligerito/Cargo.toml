@@ -60,7 +60,7 @@ prover = ["ligerito-reed-solomon", "rand", "rand_chacha", "ligerito-binary-field
 verifier-only = []
 
 # Performance optimizations
-parallel = ["rayon", "ligerito-reed-solomon?/parallel"]
+parallel = ["rayon", "ligerito-reed-solomon?/parallel", "ligerito-merkle/parallel"]
 hardware-accel = ["ligerito-binary-fields/hardware-accel", "ligerito-reed-solomon?/hardware-accel"]
 
 # Transcript implementations

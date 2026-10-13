@@ -4,7 +4,7 @@ use crate::{
     ligero::ligero_commit,
     sumcheck_polys::{fold_lsb, product_round_coeffs},
     transcript::{FiatShamir, Transcript},
-    utils::{eval_sk_at_vks, partial_eval_multilinear},
+    utils::{eval_sk_at_vks, partial_eval_lift},
     FinalLigeroProof, FinalizedLigeritoProof, LigeritoProof, ProverConfig,
     RecursiveLigeroCommitment, RecursiveLigeroProof, SumcheckTranscript,
 };
@@ -83,13 +83,12 @@ where
     proof.initial_ligero_cm = Some(cm_0);
 
     // Bind the initial_k column variables of v_0.
-    let mut v: Vec<U> = poly.iter().map(|&x| U::from(x)).collect();
     let mut eval_rounds = Vec::new();
-    let (rho_0, eval_residual) = if claims.is_empty() {
+    let (mut v, rho_0, eval_residual): (Vec<U>, Vec<U>, _) = if claims.is_empty() {
         let rho: Vec<U> = (0..config.initial_k).map(|_| fs.get_challenge()).collect();
-        partial_eval_multilinear(&mut v, &rho);
-        (rho, None)
+        (partial_eval_lift(poly, &rho), rho, None)
     } else {
+        let mut v: Vec<U> = poly.iter().map(|&x| U::from(x)).collect();
         let alphas: Vec<U> = (0..claims.len()).map(|_| fs.get_challenge()).collect();
         let mut q = compute_batched_eq::<T, U>(claims, &alphas, vcfg.poly_log_size());
         let mut rho = Vec::with_capacity(config.initial_k);
@@ -98,7 +97,7 @@ where
             eval_rounds.push(EvalSumcheckRound { s0, s1, s2 });
             rho.push(r);
         }
-        (rho, Some(q))
+        (v, rho, Some(q))
     };
 
     // v_1 = v_0(ρ_0, ·)
@@ -114,9 +113,9 @@ where
     proof.recursive_commitments.push(cm_1.clone());
     fs.absorb_root(&cm_1.root);
 
-    let queries = fs.get_distinct_queries(wtns_0.mat.len(), config.num_queries);
+    let queries = fs.get_distinct_queries(wtns_0.num_rows(), config.num_queries);
     let alpha = fs.get_challenge::<U>();
-    let opened_rows: Vec<Vec<T>> = queries.iter().map(|&q| wtns_0.mat[q].clone()).collect();
+    let opened_rows: Vec<Vec<T>> = queries.iter().map(|&q| wtns_0.row(q)).collect();
     let sks_vks: Vec<T> = eval_sk_at_vks(config.initial_dims.0);
     let (b_0, s_0) = induce_sumcheck_poly_auto(
         vcfg.initial_dim,
@@ -151,14 +150,14 @@ where
             rs.push(r);
         }
 
-        let rows = wtns_prev.mat.len();
+        let rows = wtns_prev.num_rows();
 
         if i == config.recursive_steps - 1 {
             fs.absorb_elems(&v);
             let queries = fs.get_distinct_queries(rows, config.num_queries);
             proof.final_ligero_proof = Some(FinalLigeroProof {
                 yr: v,
-                opened_rows: queries.iter().map(|&q| wtns_prev.mat[q].clone()).collect(),
+                opened_rows: queries.iter().map(|&q| wtns_prev.row(q)).collect(),
                 merkle_proof: wtns_prev.tree.prove(&queries),
             });
             proof.sumcheck_transcript = Some(SumcheckTranscript {
@@ -183,7 +182,7 @@ where
 
         let queries = fs.get_distinct_queries(rows, config.num_queries);
         let alpha = fs.get_challenge::<U>();
-        let opened_rows: Vec<Vec<U>> = queries.iter().map(|&q| wtns_prev.mat[q].clone()).collect();
+        let opened_rows: Vec<Vec<U>> = queries.iter().map(|&q| wtns_prev.row(q)).collect();
         let sks_vks: Vec<U> = eval_sk_at_vks(config.dims[i].0);
         let (b, s) = induce_sumcheck_poly_auto(
             vcfg.log_dims[i],

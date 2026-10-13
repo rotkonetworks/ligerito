@@ -141,80 +141,64 @@ where
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
     use rayon::prelude::*;
-    use std::sync::Arc;
 
     assert_eq!(opened_rows.len(), sorted_queries.len());
-
+    let basis_size = 1usize << n;
     let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
-    let basis_size = 1 << n;
-    let n_rows = opened_rows.len();
-    let n_threads = rayon::current_num_threads();
 
-    // wrap shared data in Arc for safe sharing across threads
-    let sks_vks = Arc::new(sks_vks);
+    let enforced_sum = opened_rows
+        .par_iter()
+        .zip(alpha_pows.par_iter())
+        .map(|(row, &a)| tensorized_dot_product(row, v_challenges).mul(&a))
+        .reduce(U::zero, |x, y| x.add(&y));
 
-    // compute chunk size
-    let chunk_size = n_rows.div_ceil(n_threads);
-
-    // process chunks in parallel, each thread produces its own basis and sum
-    let results: Vec<(Vec<U>, U)> = (0..n_threads)
-        .into_par_iter()
-        .map(|thread_id| {
-            let start_idx = thread_id * chunk_size;
-            let end_idx = (start_idx + chunk_size).min(n_rows);
-
-            if start_idx >= n_rows {
-                return (vec![U::zero(); basis_size], U::zero());
+    // Row k of the batched basis is α^k · ⊗_j (1, s_j(ω_{q_k})). Split the
+    // index into (hi, lo) with `split` low bits: entry = prefix_k[lo] ·
+    // suffix_k[hi]. Prefixes stay in cache while each output block of
+    // 2^split entries is accumulated.
+    // keep ≥ 4 output blocks per thread, prefixes ≤ 2^12 entries
+    let par_bits = (4 * rayon::current_num_threads()).next_power_of_two().trailing_zeros() as usize;
+    let split = n.saturating_sub(par_bits).min(12);
+    let tensor = |a: &[U], scale: U| {
+        let mut t = vec![U::zero(); 1 << a.len()];
+        t[0] = scale;
+        for (j, &aj) in a.iter().enumerate() {
+            let half = 1 << j;
+            for i in 0..half {
+                t[half + i] = t[i].mul(&aj);
             }
-
-            let mut thread_basis = vec![U::zero(); basis_size];
-            let mut thread_sum = U::zero();
-
-            // reusable buffers for this thread
-            let mut local_sks_x = vec![T::zero(); sks_vks.len()];
-            let mut local_basis = vec![U::zero(); basis_size];
-
-            for i in start_idx..end_idx {
-                let row = &opened_rows[i];
-                let query = sorted_queries[i];
-                let alpha_pow = alpha_pows[i];
-
-                // compute dot product
-                let dot = tensorized_dot_product(row, v_challenges);
-                let contribution = dot.mul(&alpha_pow);
-                thread_sum = thread_sum.add(&contribution);
-
-                let qf = T::from_bits(query as u64);
-
-                // compute scaled basis (clears buffers internally)
-                evaluate_scaled_basis_inplace(
-                    &mut local_sks_x,
-                    &mut local_basis,
-                    &sks_vks,
-                    qf,
-                    alpha_pow,
-                );
-
-                // accumulate into thread-local basis
-                for (j, &val) in local_basis.iter().enumerate() {
-                    thread_basis[j] = thread_basis[j].add(&val);
+        }
+        t
+    };
+    let (prefixes, suffixes): (Vec<Vec<U>>, Vec<Vec<U>>) = sorted_queries
+        .par_iter()
+        .zip(alpha_pows.par_iter())
+        .map(|(&q, &a)| {
+            let mut sks_x = vec![T::zero(); n.max(1)];
+            if n > 0 {
+                sks_x[0] = T::from_bits(q as u64);
+                for j in 1..n {
+                    let p = sks_x[j - 1];
+                    sks_x[j] = p.mul(&p).add(&sks_vks[j - 1].mul(&p));
                 }
             }
-
-            (thread_basis, thread_sum)
+            let sks: Vec<U> = sks_x[..n].iter().map(|&x| U::from(x)).collect();
+            (tensor(&sks[..split], a), tensor(&sks[split..], U::one()))
         })
-        .collect();
+        .unzip();
 
-    // combine results from all threads
     let mut basis_poly = vec![U::zero(); basis_size];
-    let mut enforced_sum = U::zero();
-
-    for (thread_basis, thread_sum) in results {
-        for (j, val) in thread_basis.into_iter().enumerate() {
-            basis_poly[j] = basis_poly[j].add(&val);
-        }
-        enforced_sum = enforced_sum.add(&thread_sum);
-    }
+    basis_poly
+        .par_chunks_mut(1 << split)
+        .enumerate()
+        .for_each(|(hi, block)| {
+            for (pre, suf) in prefixes.iter().zip(&suffixes) {
+                let s = suf[hi];
+                for (b, &p) in block.iter_mut().zip(pre) {
+                    *b = b.add(&p.mul(&s));
+                }
+            }
+        });
 
     (basis_poly, enforced_sum)
 }
@@ -272,7 +256,7 @@ mod tests {
 
             // all queries, including q >= m
             let queries: Vec<usize> = (0..4 * m).collect();
-            let rows: Vec<Vec<T>> = queries.iter().map(|&q| w.mat[q].clone()).collect();
+            let rows: Vec<Vec<T>> = queries.iter().map(|&q| w.row(q)).collect();
             let sks_vks: Vec<T> = eval_sk_at_vks(m);
             let alpha = U::from_bits(0x1357_9BDF);
             let (basis, sum) = induce_sumcheck_poly(log_m, &sks_vks, &rows, &rho, &queries, alpha);
@@ -416,5 +400,23 @@ mod tests {
         // With no inputs, everything should be zero
         assert_eq!(enforced_sum, BinaryElem128::zero());
         assert!(basis_poly.iter().all(|&x| x == BinaryElem128::zero()));
+    }
+
+    /// Exercise the prefix/suffix split (n > 12) of the parallel version.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_parallel_split_matches_sequential() {
+        let n = 15;
+        let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << n);
+        let v_challenges: Vec<BinaryElem128> =
+            (0..3).map(|i| BinaryElem128::from_bits(0x77 + i)).collect();
+        let queries: Vec<usize> = (0..40).map(|i| i * 4093 % (4 << n)).collect();
+        let rows: Vec<Vec<BinaryElem32>> = (0..40)
+            .map(|i| (0..8).map(|j| BinaryElem32::from((i * 8 + j) as u32 * 2654435761)).collect())
+            .collect();
+        let alpha = BinaryElem128::from_bits(0xDEAD_BEEF);
+        let seq = induce_sumcheck_poly(n, &sks_vks, &rows, &v_challenges, &queries, alpha);
+        let par = induce_sumcheck_poly_parallel(n, &sks_vks, &rows, &v_challenges, &queries, alpha);
+        assert_eq!(seq, par);
     }
 }

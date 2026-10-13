@@ -149,10 +149,35 @@ impl VerifierConfig {
 }
 
 /// Recursive Ligero witness (prover side only)
+///
+/// The encoded matrix is stored column-major in one buffer: column `c` is
+/// `cols[c * num_rows .. (c + 1) * num_rows]`. Rows (the Merkle leaves) are
+/// gathered on demand. Build with `ligero::ligero_commit` or
+/// `RecursiveLigeroWitness::from_columns`.
 #[cfg(feature = "prover")]
 pub struct RecursiveLigeroWitness<T: BinaryFieldElement> {
-    pub mat: Vec<Vec<T>>, // Row-major matrix
+    pub(crate) cols: Vec<T>,
+    pub(crate) num_rows: usize,
+    pub(crate) num_cols: usize,
     pub tree: CompleteMerkleTree,
+}
+
+#[cfg(feature = "prover")]
+impl<T: BinaryFieldElement> RecursiveLigeroWitness<T> {
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    pub fn num_cols(&self) -> usize {
+        self.num_cols
+    }
+
+    /// Row `i` of the encoded matrix (a Merkle leaf).
+    pub fn row(&self, i: usize) -> Vec<T> {
+        (0..self.num_cols)
+            .map(|c| self.cols[c * self.num_rows + i])
+            .collect()
+    }
 }
 
 /// Recursive Ligero commitment
