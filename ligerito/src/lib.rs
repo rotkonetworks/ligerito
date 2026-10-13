@@ -103,6 +103,7 @@ pub mod autosizer;
 pub mod configs;
 pub mod data_structures;
 pub mod eval_proof;
+pub mod security;
 pub mod sumcheck_polys;
 pub mod sumcheck_verifier;
 pub mod transcript;

@@ -42,10 +42,13 @@ pub struct ProverConfig<T: BinaryFieldElement, U: BinaryFieldElement> {
 impl<T: BinaryFieldElement, U: BinaryFieldElement> ProverConfig<T, U> {
     /// Validate configuration parameters
     pub fn validate(&self) -> crate::Result<()> {
-        if self.num_queries < 148 {
+        let required = crate::security::queries_for_100_bits(crate::security::LOG_INV_RATE)
+            .unwrap_or(usize::MAX);
+        if self.num_queries < required {
             #[cfg(feature = "std")]
             return Err(crate::LigeritoError::InvalidConfig(format!(
-                "num_queries must be >= 148 for 100-bit security, got {}",
+                "num_queries must be >= {required} for 100-bit security at rate 1/{}, got {}",
+                1 << crate::security::LOG_INV_RATE,
                 self.num_queries
             )));
             #[cfg(not(feature = "std"))]
@@ -57,13 +60,20 @@ impl<T: BinaryFieldElement, U: BinaryFieldElement> ProverConfig<T, U> {
             && self.ks.len() == self.recursive_steps
             && self.reed_solomon_codes.len() == self.recursive_steps
             && self.initial_reed_solomon.message_length() == self.initial_dims.0
+            && self.initial_reed_solomon.block_length()
+                == self.initial_dims.0 << crate::security::LOG_INV_RATE
             && self.verifier_config().is_well_formed()
             && self
                 .dims
                 .iter()
                 .zip(&self.ks)
                 .zip(&self.reed_solomon_codes)
-                .all(|((&(m, n), &k), rs)| n == 1 << k && rs.message_length() == m && m.is_power_of_two());
+                .all(|((&(m, n), &k), rs)| {
+                    n == 1 << k
+                        && rs.message_length() == m
+                        && rs.block_length() == m << crate::security::LOG_INV_RATE
+                        && m.is_power_of_two()
+                });
         if !shape_ok {
             #[cfg(feature = "std")]
             return Err(crate::LigeritoError::InvalidConfig(
@@ -111,11 +121,19 @@ impl VerifierConfig {
         self.initial_dim + self.initial_k
     }
 
-    /// Dimensions chain correctly: each round's message length equals the
-    /// previous round's folded length.
+    /// Per-level soundness accounting (see [`crate::security`]).
+    #[cfg(feature = "std")]
+    pub fn security_report(&self) -> crate::security::SecurityReport {
+        crate::security::analyze(self)
+    }
+
+    /// Dimensions chain correctly (each round's message length equals the
+    /// previous round's folded length) and `num_queries` meets the 100-bit
+    /// row-test bound for the code rate (see [`crate::security`]).
     pub fn is_well_formed(&self) -> bool {
         self.recursive_steps >= 1
-            && self.num_queries > 0
+            && crate::security::queries_for_100_bits(crate::security::LOG_INV_RATE)
+                .is_some_and(|q| self.num_queries >= q)
             && self.log_dims.len() == self.recursive_steps
             && self.ks.len() == self.recursive_steps
             && self.poly_log_size() < usize::BITS as usize - 2

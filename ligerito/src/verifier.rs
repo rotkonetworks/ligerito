@@ -11,7 +11,7 @@ use crate::{
 use binary_fields::BinaryFieldElement;
 use merkle_tree::{BatchedMerkleProof, Hash, MerkleRoot};
 
-const LOG_INV_RATE: usize = 2;
+use crate::security::LOG_INV_RATE;
 
 /// `s_j(x)` for `j < k` (see `utils::evaluate_scaled_basis_inplace`).
 fn subspace_evals<F: BinaryFieldElement>(x: F, k: usize, sks_vks: &[F]) -> Vec<F> {
