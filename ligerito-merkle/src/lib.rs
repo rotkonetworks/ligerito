@@ -50,7 +50,25 @@ pub fn is_power_of_two(n: usize) -> bool {
     n > 0 && (n & (n - 1)) == 0
 }
 
+/// Leaf and node hash counters (feature `op-count`).
+#[cfg(feature = "op-count")]
+pub mod op_count {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub(crate) static LEAF: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static NODE: AtomicU64 = AtomicU64::new(0);
+    /// `(leaf hashes, node hashes)`
+    pub fn snapshot() -> (u64, u64) {
+        (LEAF.load(Relaxed), NODE.load(Relaxed))
+    }
+    pub fn reset() {
+        LEAF.store(0, Relaxed);
+        NODE.store(0, Relaxed);
+    }
+}
+
 pub fn hash_leaf<T: Pod>(leaf: &T) -> Hash {
+    #[cfg(feature = "op-count")]
+    op_count::LEAF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let bytes = bytemuck::bytes_of(leaf);
     let mut hasher = Hasher::new();
     hasher.update(bytes);
@@ -58,6 +76,8 @@ pub fn hash_leaf<T: Pod>(leaf: &T) -> Hash {
 }
 
 pub fn hash_siblings(left: &Hash, right: &Hash) -> Hash {
+    #[cfg(feature = "op-count")]
+    op_count::NODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let mut hasher = Hasher::new();
     hasher.update(left);
     hasher.update(right);

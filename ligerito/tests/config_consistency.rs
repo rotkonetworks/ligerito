@@ -5,7 +5,16 @@ use ligerito::{autosizer, configs::*, ProverConfig, VerifierConfig};
 use ligerito_binary_fields::{BinaryElem128 as U, BinaryElem32 as T};
 use std::marker::PhantomData;
 
+/// Sizes whose encoded matrix (2^(n+2) elements) a 32-bit target cannot address.
+fn fits_target(v: &VerifierConfig) -> bool {
+    v.poly_log_size() + 2 < usize::BITS as usize
+}
+
 fn same(name: &str, p: &ProverConfig<T, U>, v: &VerifierConfig) {
+    if !fits_target(v) {
+        assert!(p.validate().is_err(), "{name}: oversized config must be rejected");
+        return;
+    }
     p.validate().unwrap_or_else(|e| panic!("{name}: validate failed: {e:?}"));
     let d = p.verifier_config();
     assert!(v.is_well_formed(), "{name}: verifier config malformed");

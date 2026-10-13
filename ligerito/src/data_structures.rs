@@ -54,6 +54,17 @@ impl<T: BinaryFieldElement, U: BinaryFieldElement> ProverConfig<T, U> {
             #[cfg(not(feature = "std"))]
             return Err(crate::LigeritoError::InvalidConfig);
         }
+        // the encoded initial matrix holds 2^(n + LOG_INV_RATE) elements
+        let log_size = self.initial_dims.0.trailing_zeros() as usize + self.initial_k;
+        if log_size + crate::security::LOG_INV_RATE >= usize::BITS as usize {
+            #[cfg(feature = "std")]
+            return Err(crate::LigeritoError::InvalidConfig(format!(
+                "2^{log_size} polynomial is too large for a {}-bit target",
+                usize::BITS
+            )));
+            #[cfg(not(feature = "std"))]
+            return Err(crate::LigeritoError::InvalidConfig);
+        }
         let shape_ok = self.initial_dims.1 == 1 << self.initial_k
             && self.recursive_steps >= 1
             && self.dims.len() == self.recursive_steps

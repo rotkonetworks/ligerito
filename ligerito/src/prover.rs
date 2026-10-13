@@ -254,7 +254,7 @@ where
     prove_with_transcript(config, poly, fs)
 }
 
-/// Prover function using Julia-compatible SHA256 transcript
+/// Prover using the SHA-256 transcript (verify with `verify_sha256`)
 pub fn prove_sha256<T, U>(
     config: &ProverConfig<T, U>,
     poly: &[T],

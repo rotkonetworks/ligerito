@@ -100,6 +100,10 @@ wasm-parallel = [
     "js-sys",                   # JavaScript Promise types
 ]
 
+# count field operations and hashes (relaxed atomics) to audit verifier cost;
+# see tests/verifier_cost.rs
+op-count = ["ligerito-binary-fields/op-count", "ligerito-merkle/op-count"]
+
 # wasm-parallel for pages served as plain ES modules (no bundler), e.g. the
 # ligerito.rotko.net demo: the worker helper loads the main module by path
 wasm-parallel-no-bundler = ["wasm-parallel", "wasm-bindgen-rayon/no-bundler"]
@@ -219,11 +223,14 @@ version = "0.14"
 default-features = false
 
 [dev-dependencies]
-criterion = { workspace = true }
 bincode = { version = "1.3" }
 rand = { workspace = true }
 
 # CLI binary
+# criterion pulls in rayon, which does not build for wasm32-wasip1 test runs
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { workspace = true }
+
 [[bin]]
 name = "ligerito"
 path = "src/bin/ligerito.rs"
@@ -239,6 +246,10 @@ name = "detailed_proof_breakdown"
 path = "examples/detailed_proof_breakdown.rs"
 
 # Benchmarks
+[[test]]
+name = "verifier_cost"
+required-features = ["op-count"]
+
 [[bench]]
 name = "ligerito_bench"
 harness = false

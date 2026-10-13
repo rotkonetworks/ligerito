@@ -28,6 +28,8 @@ serde = ["dep:serde"]
 rand = ["dep:rand"]
 # SCALE codec for Substrate runtime (no_std compatible)
 scale = ["dep:codec", "dep:scale-info"]
+# count leaf/node hashes (relaxed atomics) for cost audits
+op-count = []
 
 [dev-dependencies]
 rand = "0.8"

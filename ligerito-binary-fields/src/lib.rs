@@ -7,6 +7,8 @@
 
 mod elem;
 pub mod fast_inverse;
+#[cfg(feature = "op-count")]
+pub mod op_count;
 mod poly;
 pub mod simd;
 

@@ -272,13 +272,19 @@ wasm simd128 optimizations:
 
 ### benchmark results
 
-benchmarked on amd ryzen 9 7945hx (16 cores / 32 threads, AVX-512 + VPCLMULQDQ):
+ligerito 0.7.1, amd ryzen 9 7945hx (16 cores / 32 threads, AVX-512 + VPCLMULQDQ),
+`-C target-cpu=native`, SHA-256 transcript, autosized configs, median of 5:
 
-| size | elements | prove time | verify time | proof size | throughput |
-|------|----------|------------|-------------|------------|------------|
-| 2^20 | 1.05m | **41ms** | 5ms | 149 KB | 25.6m elem/s |
-| 2^24 | 16.8m | **570ms** | 29ms | 245 KB | 29.4m elem/s |
-| 2^28 | 268.4m | ~9s | ~400ms | ~2.4 MB | 29.8m elem/s |
+| size | data | prove | verify | proof size |
+|------|------|-------|--------|------------|
+| 2^20 | 4 MB | 15 ms | 2.4 ms | 144 KB |
+| 2^24 | 64 MB | 230 ms | 3.9 ms | 237 KB |
+| 2^25 | 128 MB | 465 ms | 5.6 ms | 267 KB |
+
+in the browser (wasm, SIMD128, 32 workers): 2^20 proves in ~400 ms and verifies in ~20 ms.
+
+versions before 0.7 reported faster numbers because their verifier did not check
+the proof; those figures are not comparable.
 
 use the built-in benchmark command (no I/O overhead):
 ```bash
@@ -286,6 +292,8 @@ ligerito bench --size 24 --verify --iterations 5
 ```
 
 ### parallel scaling analysis
+
+*(measured on 0.6, before the 0.7 protocol fix; kept for the shape of the curve)*
 
 the prover is **memory-bandwidth bound**, not compute-bound. scaling efficiency drops significantly beyond 8 cores:
 
@@ -309,6 +317,8 @@ the prover is **memory-bandwidth bound**, not compute-bound. scaling efficiency 
 4. **diminishing returns**: 7.6x speedup on 32 threads (vs theoretical 32x) is actually good for memory-bound workloads. typical memory-bound algorithms achieve 4-8x on many-core systems.
 
 ### simd tier comparison
+
+*(measured on 0.6; the 0.6 SIMD butterflies were incorrect, see the 0.7 changelog)*
 
 fft butterfly performance (2^24 elements, single iteration):
 
@@ -361,6 +371,22 @@ current bottlenecks and potential solutions:
 | FFT memory access | cache-blocked FFT | 1.2-1.5x |
 | field element size | GF(2^16) instead of GF(2^32) | 1.5-2x |
 | cross-CCD latency | NUMA-aware allocation | 1.1-1.2x |
+
+## security and testing
+
+- **soundness accounting**: `VerifierConfig::security_report()` (module `security`) lists every
+  error term of the protocol per level — row test, proximity gap, row batching, sumcheck,
+  glue — with its formula, and union-bounds them. the shipped configs come out at
+  98–99.4 bits (each 148-query row test is ~100.35 bits; levels add). the analysis is
+  versioned (`security::ANALYSIS_VERSION`) and has not had external review.
+- **known-answer vectors**: `test-vectors/ligerito_kat.txt` pins transcript challenges, a merkle
+  root and a full proof digest; `test-vectors/bolt_rs_vectors.json` holds field products and
+  reed-solomon codewords from an independent implementation (bcc-research/bolt-rs).
+- **regression suites**: `tests/soundness.rs` (tampered proofs must be rejected),
+  `tests/config_consistency.rs`, and `tests/kat.rs`.
+- **wasm**: `scripts/test-wasm.sh` runs the suites as wasm32 + SIMD128 under node's WASI.
+- **verifier cost**: `cargo test --features op-count --test verifier_cost -- --nocapture`
+  prints field multiplications, inversions and hashes per `verify` (on-chain budgeting).
 
 ## reference
 

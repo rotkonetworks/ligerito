@@ -465,7 +465,7 @@ where
     verify_complete_with_transcript(config, proof, fs)
 }
 
-/// complete verifier with SHA256 transcript (Julia-compatible)
+/// complete verifier with the SHA-256 transcript
 pub fn verify_complete_sha256<T, U>(
     config: &VerifierConfig,
     proof: &FinalizedLigeritoProof<T, U>,

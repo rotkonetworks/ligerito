@@ -155,7 +155,7 @@ impl Transcript for MerlinTranscript {
     }
 }
 
-/// SHA256-based Fiat-Shamir transcript (Julia-compatible mode)
+/// SHA-256 Fiat-Shamir transcript (deterministic, no_std, wasm-friendly)
 ///
 /// Uses deterministic hash-based expansion for all random values.
 /// This ensures identical behavior across native, WASM, and all platforms.
@@ -190,7 +190,8 @@ impl Sha256Transcript {
         t
     }
 
-    /// Create a Julia-compatible transcript (1-based queries)
+    /// Transcript using Ligerito.jl's 1-based query indexing. Only the
+    /// query convention matches; proofs are not interoperable with Ligerito.jl.
     pub fn new_julia_compatible(seed: i32) -> Self {
         let mut transcript = Self::new(seed);
         transcript.julia_compatible = true;

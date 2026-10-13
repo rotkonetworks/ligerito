@@ -41,6 +41,8 @@ scale = ["dep:codec", "dep:scale-info"]
 # simd = ["portable-simd"]
 # x86-specific hardware acceleration (pclmulqdq, avx512)
 hardware-accel = []
+# count field multiplications/inversions (relaxed atomics) for cost audits
+op-count = []
 
 # [[bench]]
 # name = "field_ops"

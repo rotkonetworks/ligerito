@@ -78,6 +78,8 @@ macro_rules! impl_binary_elem {
             }
 
             fn mul(&self, other: &Self) -> Self {
+                #[cfg(feature = "op-count")]
+                crate::op_count::bump_mul($bitsize);
                 // Perform full multiplication using double-width type
                 let a_wide = $poly_double::from_value(self.0.value() as u64);
                 let b_wide = $poly_double::from_value(other.0.value() as u64);
@@ -89,6 +91,8 @@ macro_rules! impl_binary_elem {
 
             fn inv(&self) -> Self {
                 assert_ne!(self.0.value(), 0, "Cannot invert zero");
+                #[cfg(feature = "op-count")]
+                crate::op_count::bump_inv($bitsize);
 
                 // For binary fields, we can use Fermat's little theorem efficiently
                 // a^(2^n - 2) = a^(-1) in GF(2^n)
@@ -213,6 +217,8 @@ impl BinaryFieldElement for BinaryElem128 {
     }
 
     fn mul(&self, other: &Self) -> Self {
+        #[cfg(feature = "op-count")]
+        crate::op_count::bump(&crate::op_count::MUL128);
         // Use SIMD carryless multiplication + reduction for performance
         use crate::simd::{carryless_mul_128_full, reduce_gf128};
 
@@ -225,6 +231,8 @@ impl BinaryFieldElement for BinaryElem128 {
     fn inv(&self) -> Self {
         assert_ne!(self.0.value(), 0, "Cannot invert zero");
 
+        #[cfg(feature = "op-count")]
+        crate::op_count::bump(&crate::op_count::INV128);
         // Use Itoh-Tsujii fast inversion with precomputed nibble tables
         // Reduces from ~127 multiplications to ~9
         let result = crate::fast_inverse::invert_gf128(self.0.value());

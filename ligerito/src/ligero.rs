@@ -69,6 +69,8 @@ pub fn encode_cols<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static
 /// Optimized: hashes entire row at once instead of element-by-element
 #[inline(always)]
 pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
+    #[cfg(feature = "op-count")]
+    crate::op_count::bump_row_hash();
     let mut hasher = Sha256::new();
 
     // Hash row length for domain separation

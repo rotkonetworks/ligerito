@@ -316,6 +316,8 @@ mod tests {
 /// Hash a row for Merkle tree commitment
 /// Used by both prover and verifier
 pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> merkle_tree::Hash {
+    #[cfg(feature = "op-count")]
+    crate::op_count::bump_row_hash();
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();

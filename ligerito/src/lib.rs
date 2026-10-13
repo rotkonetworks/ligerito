@@ -104,6 +104,8 @@ pub mod configs;
 pub mod data_structures;
 pub mod eval_proof;
 pub mod security;
+#[cfg(feature = "op-count")]
+pub mod op_count;
 pub mod sumcheck_polys;
 pub mod sumcheck_verifier;
 pub mod transcript;

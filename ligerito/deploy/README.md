@@ -141,9 +141,9 @@ cargo install ligerito  # will show build warning about missing SIMD
 
 **check your build:**
 ```bash
-ligerito --version  # should show v0.2.3 or later
-ligerito generate --size 20 | ligerito prove --size 20 2>&1 | grep "SIMD"
-# output should show: [release SIMD] for optimal performance
+ligerito --version  # should show v0.2.4 or later
+ligerito bench --size 20  # quick performance test (no I/O overhead)
+# look for [release SIMD] in prove output for optimal performance
 ```
 
 ### prove and verify
@@ -194,6 +194,22 @@ ligerito generate --size 20 --pattern sequential > poly.bin
 
 # save to file
 ligerito generate --size 20 --pattern random --output test.bin
+```
+
+### benchmark (no I/O overhead)
+
+```bash
+# prove only
+ligerito bench --size 24
+
+# prove + verify
+ligerito bench --size 24 --verify
+
+# multiple iterations
+ligerito bench --size 24 --verify --iterations 10
+
+# with specific thread count
+RAYON_NUM_THREADS=16 ligerito bench --size 24
 ```
 
 ### show configuration
@@ -254,33 +270,123 @@ wasm simd128 optimizations:
 
 ## performance
 
-benchmarked on amd ryzen 9 7945hx (8 physical cores, SMT off, turbo off):
+### benchmark results
 
-| size | elements | proving | proof size |
-|------|----------|---------|------------|
-| 2^20 | 1.05m | **50ms** | 149 KB |
-| 2^24 | 16.8m | 650ms | 2.4 MB |
-| 2^28 | 268.4m | 10s | 38 MB |
+ligerito 0.7.1, amd ryzen 9 7945hx (16 cores / 32 threads, AVX-512 + VPCLMULQDQ),
+`-C target-cpu=native`, SHA-256 transcript, autosized configs, median of 5:
 
-**simd tier comparison (fft butterfly, 2^20 elements):**
+| size | data | prove | verify | proof size |
+|------|------|-------|--------|------------|
+| 2^20 | 4 MB | 15 ms | 2.4 ms | 144 KB |
+| 2^24 | 64 MB | 230 ms | 3.9 ms | 237 KB |
+| 2^25 | 128 MB | 465 ms | 5.6 ms | 267 KB |
 
-| tier | elements/iter | time | speedup |
-|------|---------------|------|---------|
-| AVX-512 | 8 | 0.96ms | 1.9x |
-| AVX2 | 4 | 1.25ms | 1.5x |
-| SSE | 2 | 1.86ms | baseline |
+in the browser (wasm, SIMD128, 32 workers): 2^20 proves in ~400 ms and verifies in ~20 ms.
 
-**benchmarking setup:**
+versions before 0.7 reported faster numbers because their verifier did not check
+the proof; those figures are not comparable.
+
+use the built-in benchmark command (no I/O overhead):
 ```bash
-# disable SMT (hyperthreading causes cache contention)
-echo "off" | sudo tee /sys/devices/system/cpu/smt/control
-
-# run benchmark
-RAYON_NUM_THREADS=8 taskset -c 0-7 cargo run --release --example quick_bench
-
-# restore SMT
-echo "on" | sudo tee /sys/devices/system/cpu/smt/control
+ligerito bench --size 24 --verify --iterations 5
 ```
+
+### parallel scaling analysis
+
+*(measured on 0.6, before the 0.7 protocol fix; kept for the shape of the curve)*
+
+the prover is **memory-bandwidth bound**, not compute-bound. scaling efficiency drops significantly beyond 8 cores:
+
+| threads | 2^24 prove | speedup | efficiency |
+|---------|------------|---------|------------|
+| 1 | 4339ms | 1.0x | 100% |
+| 2 | 2301ms | 1.9x | 94% |
+| 4 | 1251ms | 3.5x | 87% |
+| 8 | 780ms | 5.6x | 70% |
+| 16 | 617ms | 7.0x | 44% |
+| 32 | 570ms | 7.6x | 24% |
+
+**why scaling stops at ~8 cores:**
+
+1. **memory bandwidth saturation**: 2^24 elements = 64MB polynomial. the FFT reads/writes this data multiple times per level. DDR5 bandwidth (~100GB/s) becomes the bottleneck, not CPU cycles.
+
+2. **L3 cache pressure**: ryzen 7945hx has 64MB L3 (32MB per CCD). the polynomial barely fits in cache. with >8 cores, cross-CCD traffic over infinity fabric adds latency.
+
+3. **amdahl's law**: FFT has log2(n) = 24 levels. only some levels run in parallel. merkle tree construction and transcript hashing have limited parallelism.
+
+4. **diminishing returns**: 7.6x speedup on 32 threads (vs theoretical 32x) is actually good for memory-bound workloads. typical memory-bound algorithms achieve 4-8x on many-core systems.
+
+### simd tier comparison
+
+*(measured on 0.6; the 0.6 SIMD butterflies were incorrect, see the 0.7 changelog)*
+
+fft butterfly performance (2^24 elements, single iteration):
+
+| tier | instruction | elements/op | time | vs SSE |
+|------|-------------|-------------|------|--------|
+| AVX-512 | vpclmulqdq zmm | 8 | 17ms | 2.6x |
+| AVX2 | vpclmulqdq ymm | 4 | 25ms | 1.8x |
+| SSE | pclmulqdq xmm | 2 | 45ms | baseline |
+
+runtime detection automatically selects the best available tier.
+
+### cli vs library performance
+
+the CLI has ~2x overhead when using pipes due to I/O:
+
+| method | 2^24 prove |
+|--------|------------|
+| `ligerito bench --size 24` | 570ms |
+| `generate \| prove \| verify` | ~1200ms |
+
+the overhead comes from:
+- piping 64MB through stdin/stdout
+- random number generation in `generate`
+- proof serialization/deserialization
+
+for benchmarking, always use `ligerito bench` which measures pure algorithm performance.
+
+### optimal configuration
+
+```bash
+# best performance: all threads, SMT on
+RAYON_NUM_THREADS=32 ligerito bench --size 24
+
+# consistent benchmarks: physical cores only, SMT off
+echo "off" | sudo tee /sys/devices/system/cpu/smt/control
+RAYON_NUM_THREADS=16 taskset -c 0-15 ligerito bench --size 24
+echo "on" | sudo tee /sys/devices/system/cpu/smt/control
+
+# single CCD (lower latency, less throughput)
+RAYON_NUM_THREADS=8 taskset -c 0-7 ligerito bench --size 24
+```
+
+### improving performance further
+
+current bottlenecks and potential solutions:
+
+| bottleneck | solution | expected gain |
+|------------|----------|---------------|
+| memory bandwidth | GPU acceleration (HBM) | 5-10x |
+| FFT memory access | cache-blocked FFT | 1.2-1.5x |
+| field element size | GF(2^16) instead of GF(2^32) | 1.5-2x |
+| cross-CCD latency | NUMA-aware allocation | 1.1-1.2x |
+
+## security and testing
+
+- **soundness accounting**: `VerifierConfig::security_report()` (module `security`) lists every
+  error term of the protocol per level — row test, proximity gap, row batching, sumcheck,
+  glue — with its formula, and union-bounds them. the shipped configs come out at
+  98–99.4 bits (each 148-query row test is ~100.35 bits; levels add). the analysis is
+  versioned (`security::ANALYSIS_VERSION`) and has not had external review.
+- **known-answer vectors**: `test-vectors/ligerito_kat.txt` pins transcript challenges, a merkle
+  root and a full proof digest; `test-vectors/bolt_rs_vectors.json` holds field products and
+  reed-solomon codewords from an independent implementation (bcc-research/bolt-rs).
+- **regression suites**: `tests/soundness.rs` (tampered proofs must be rejected),
+  `tests/config_consistency.rs`, and `tests/kat.rs`.
+- **wasm**: `scripts/test-wasm.sh` runs the suites as wasm32 + SIMD128 under node's WASI.
+- **verifier cost**: `cargo test --features op-count --test verifier_cost -- --nocapture`
+  prints field multiplications, inversions and hashes per `verify` (on-chain budgeting).
 
 ## reference
 
