@@ -43,13 +43,13 @@ fn main() {
             "cargo:warning=║  Or install from source:                                         ║"
         );
         println!(
-            "cargo:warning=║    git clone https://github.com/rotkonetworks/zeratul            ║"
+            "cargo:warning=║    git clone https://github.com/rotkonetworks/ligerito            ║"
         );
         println!(
-            "cargo:warning=║    cd zeratul                                                     ║"
+            "cargo:warning=║    cd ligerito                                                    ║"
         );
         println!(
-            "cargo:warning=║    cargo install --path crates/ligerito                          ║"
+            "cargo:warning=║    cargo install --path ligerito                                  ║"
         );
         println!(
             "cargo:warning=╚═══════════════════════════════════════════════════════════════════╝"

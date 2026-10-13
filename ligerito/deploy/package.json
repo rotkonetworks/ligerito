@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rotkonetworks/zeratul"
+    "url": "https://github.com/rotkonetworks/ligerito"
   },
   "files": [
     "ligerito_bg.wasm",

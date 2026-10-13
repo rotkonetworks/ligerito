@@ -34,8 +34,8 @@ ligerito = "0.3.1"
 
 **⚠️ for development:** clone the workspace to get automatic native optimizations:
 ```bash
-git clone https://github.com/rotkonetworks/zeratul
-cd zeratul
+git clone https://github.com/rotkonetworks/ligerito
+cd ligerito
 cargo build --release -p ligerito
 ```
 
@@ -117,9 +117,9 @@ minimal build for wasm/embedded (requires `alloc`)
 RUSTFLAGS="-C target-cpu=native" cargo install ligerito
 
 # or from source
-git clone https://github.com/rotkonetworks/zeratul
-cd zeratul
-cargo install --path crates/ligerito
+git clone https://github.com/rotkonetworks/ligerito
+cd ligerito
+cargo install --path ligerito
 ```
 
 the workspace config automatically enables native cpu optimizations.

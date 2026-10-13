@@ -22,7 +22,7 @@ echo "Note: Enabling WASM SIMD128 for 2-4x speedup in binary field operations"
 echo "Note: Setting max memory to 4GB for large polynomial support (2^28)"
 
 # Build ligerito package from workspace root
-cd ../../..
+cd ../..
 RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--max-memory=4294967296' \
 cargo +nightly build \
     --package ligerito \
@@ -32,7 +32,7 @@ cargo +nightly build \
     --features ligerito/wasm-parallel,ligerito/hardware-accel,ligerito/transcript-merlin,ligerito/transcript-blake2b \
     --no-default-features \
     -Z build-std=panic_abort,std
-cd crates/ligerito/scripts
+cd ligerito/scripts
 
 echo
 echo "✓ WASM binary built successfully"
