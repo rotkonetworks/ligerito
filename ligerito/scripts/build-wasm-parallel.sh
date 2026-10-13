@@ -23,13 +23,16 @@ echo "Note: Setting max memory to 4GB for large polynomial support (2^28)"
 
 # Build ligerito package from workspace root
 cd ../..
-RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--max-memory=4294967296' \
-cargo +nightly build \
+# shared, imported memory + TLS exports are required by wasm-bindgen's
+# threads transform; recent nightlies no longer add them implicitly
+RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=4294967296 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base' \
+cargo +nightly rustc \
     --package ligerito \
     --lib \
+    --crate-type cdylib \
     --release \
     --target wasm32-unknown-unknown \
-    --features ligerito/wasm-parallel,ligerito/hardware-accel,ligerito/transcript-merlin,ligerito/transcript-blake2b \
+    --features ligerito/wasm-parallel-no-bundler,ligerito/hardware-accel,ligerito/transcript-merlin,ligerito/transcript-blake2b \
     --no-default-features \
     -Z build-std=panic_abort,std
 cd ligerito/scripts

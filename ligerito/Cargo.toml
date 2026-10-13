@@ -100,6 +100,10 @@ wasm-parallel = [
     "js-sys",                   # JavaScript Promise types
 ]
 
+# wasm-parallel for pages served as plain ES modules (no bundler), e.g. the
+# ligerito.rotko.net demo: the worker helper loads the main module by path
+wasm-parallel-no-bundler = ["wasm-parallel", "wasm-bindgen-rayon/no-bundler"]
+
 # Raw WASM - no wasm-bindgen, just extern "C" exports
 # Use this for manual multi-instance parallelism or minimal bindings
 # Note: Uses custom random seeding from JS instead of getrandom
