@@ -1,0 +1,12 @@
+transcript.sha256.challenges_u128 = 6c8aa2d7056338c6c1916613ecbc3397,4b12794aa68f73af34a9ca1dfdbec7ff,80797fa16e386856d080c7a756a411f8
+transcript.sha256.challenge_u32 = f33267e7
+transcript.sha256.queries = [37, 123, 135, 139, 568, 570, 667, 884]
+transcript.merlin.challenges_u128 = 5bfb3d149328f4de66746ee1f7b853fd,65ee7a38c1b83ba1b5b2f6b81259ca0a,d571396ca32f0aa1191e9be70414afdb
+transcript.merlin.challenge_u32 = 329d477a
+transcript.merlin.queries = [0, 163, 279, 510, 809, 879, 943, 959]
+transcript.blake2b.challenges_u128 = 5742bd1c61707204b8262d393ba14050,1d408c5c765f83f52c30c7e0bd17bdfe,67c80d89f4f4fe76c65754ef1f474be6
+transcript.blake2b.challenge_u32 = d503dd52
+transcript.blake2b.queries = [10, 172, 307, 345, 558, 594, 803, 811]
+merkle.root_64_rows = cfa8f006f331679a7a2e797d54357dac99a0c365847a645060c7ad88f6600b8f
+proof.config12_sha256.digest = 70e3d731bb01c01a2a3a5586d90cd5f89a6c260a838657674695c2fd218fa51c
+proof.config12_sha256.size_bytes = 32704

@@ -67,6 +67,20 @@ pub trait Transcript {
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> alloc::vec::Vec<usize>;
 }
 
+/// A field element from its little-endian bit representation.
+///
+/// Every `BinaryFieldElement` is `repr(transparent)` over an unsigned
+/// integer whose bits are the polynomial-basis coefficients, so any byte
+/// string of the right length is a valid element and all elements are
+/// equally likely for uniform input. (Building the high half by repeated
+/// `add`-doubling is wrong in characteristic 2: `x + x = 0`.)
+fn elem_from_le_bytes<F: BinaryFieldElement>(bytes: &[u8]) -> F {
+    assert!(bytes.len() >= core::mem::size_of::<F>());
+    // SAFETY: F is a transparent wrapper over a primitive integer; every bit
+    // pattern is valid and read_unaligned has no alignment requirement
+    unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const F) }
+}
+
 /// Merlin-based Fiat-Shamir transcript (recommended, requires std and merlin feature)
 #[cfg(feature = "transcript-merlin")]
 pub struct MerlinTranscript {
@@ -105,98 +119,10 @@ impl Transcript for MerlinTranscript {
     }
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
-        let field_bytes = core::mem::size_of::<F>();
-        let mut bytes = vec![0u8; field_bytes];
-
-        // Get initial challenge bytes
-        self.transcript.challenge_bytes(b"challenge", &mut bytes);
-
-        // Convert bytes to field element
-        let mut result = F::zero();
-        let bits_needed = match field_bytes {
-            4 => 32,   // BinaryElem32
-            16 => 128, // BinaryElem128
-            _ => field_bytes * 8,
-        };
-
-        // Create a more diverse bit pattern
-        let mut bit_count = 0;
-        for &byte in bytes.iter() {
-            for bit_idx in 0..8 {
-                if bit_count >= bits_needed {
-                    break;
-                }
-
-                if (byte >> bit_idx) & 1 == 1 {
-                    // Create x^bit_count where x is the primitive element
-                    let power = if bit_count == 0 {
-                        F::one()
-                    } else {
-                        // Use a primitive element (not 1) for the base
-                        let base = F::from_bits(2); // x in GF(2^n)
-                        let mut result = F::one();
-                        for _ in 0..bit_count {
-                            result = result.mul(&base);
-                        }
-                        result
-                    };
-                    result = result.add(&power);
-                }
-                bit_count += 1;
-            }
-            if bit_count >= bits_needed {
-                break;
-            }
-        }
-
-        // If we got all ones (which happens when bytes = [1, 0, 0, ...])
-        // or all zeros, we need to ensure diversity
-        if result == F::one() || result == F::zero() {
-            // Mix in the byte position to create diversity
-            self.transcript.append_message(b"retry", &bytes);
-            self.transcript
-                .challenge_bytes(b"challenge_retry", &mut bytes);
-
-            // XOR with position-based pattern to ensure different challenges
-            for i in 0..4 {
-                if i < field_bytes {
-                    bytes[i] ^= (i as u8 + 1) * 17; // Use prime multiplier for better distribution
-                }
-            }
-
-            // Recompute with mixed bytes
-            result = F::zero();
-            bit_count = 0;
-            for &byte in bytes.iter() {
-                for bit_idx in 0..8 {
-                    if bit_count >= bits_needed {
-                        break;
-                    }
-
-                    if (byte >> bit_idx) & 1 == 1 {
-                        // Create x^bit_count where x is the primitive element
-                        let power = if bit_count == 0 {
-                            F::one()
-                        } else {
-                            // Use a primitive element (not 1) for the base
-                            let base = F::from_bits(2); // x in GF(2^n)
-                            let mut result = F::one();
-                            for _ in 0..bit_count {
-                                result = result.mul(&base);
-                            }
-                            result
-                        };
-                        result = result.add(&power);
-                    }
-                    bit_count += 1;
-                }
-                if bit_count >= bits_needed {
-                    break;
-                }
-            }
-        }
-
-        result
+        let mut bytes = [0u8; 32];
+        let n = core::mem::size_of::<F>();
+        self.transcript.challenge_bytes(b"challenge", &mut bytes[..n]);
+        elem_from_le_bytes(&bytes[..n])
     }
 
     fn absorb_bytes(&mut self, _label: &[u8], data: &[u8]) {
@@ -341,73 +267,8 @@ impl Transcript for Sha256Transcript {
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
         // Use deterministic squeeze_bytes for cross-platform compatibility
-        // This ensures identical challenges on native, WASM, and all platforms
         let bytes = self.squeeze_bytes(core::mem::size_of::<F>());
-
-        match core::mem::size_of::<F>() {
-            2 => {
-                // BinaryElem16
-                let value = u16::from_le_bytes([bytes[0], bytes[1]]);
-                F::from_bits(value as u64)
-            }
-            4 => {
-                // BinaryElem32
-                let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                F::from_bits(value as u64)
-            }
-            16 => {
-                // BinaryElem128 - construct from bytes
-                let mut low_bytes = [0u8; 8];
-                let mut high_bytes = [0u8; 8];
-                low_bytes.copy_from_slice(&bytes[0..8]);
-                high_bytes.copy_from_slice(&bytes[8..16]);
-
-                let low = u64::from_le_bytes(low_bytes);
-                let high = u64::from_le_bytes(high_bytes);
-
-                // Build field element bit by bit
-                let mut result = F::zero();
-
-                // Set bits 0-63
-                for i in 0..64 {
-                    if (low >> i) & 1 == 1 {
-                        let bit_value = F::from_bits(1u64 << i);
-                        result = result.add(&bit_value);
-                    }
-                }
-
-                // Set bits 64-127
-                let mut power_of_2_64 = F::from_bits(1u64 << 63);
-                power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
-
-                let mut current_power = power_of_2_64;
-                for i in 0..64 {
-                    if (high >> i) & 1 == 1 {
-                        result = result.add(&current_power);
-                    }
-                    if i < 63 {
-                        current_power = current_power.add(&current_power);
-                    }
-                }
-
-                result
-            }
-            _ => {
-                // Generic fallback
-                let mut result = F::zero();
-                for (byte_idx, &byte) in bytes.iter().enumerate() {
-                    for bit_idx in 0..8 {
-                        if (byte >> bit_idx) & 1 == 1 {
-                            let global_bit = byte_idx * 8 + bit_idx;
-                            if global_bit < 64 {
-                                result = result.add(&F::from_bits(1u64 << global_bit));
-                            }
-                        }
-                    }
-                }
-                result
-            }
-        }
+        elem_from_le_bytes(&bytes)
     }
 
     fn get_query(&mut self, max: usize) -> usize {
@@ -541,67 +402,7 @@ impl Transcript for Blake2bTranscript {
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
         let bytes = self.squeeze(b"field_challenge");
-        let field_bytes = core::mem::size_of::<F>();
-
-        match field_bytes {
-            4 => {
-                // BinaryElem32
-                let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                F::from_bits(value as u64)
-            }
-            16 => {
-                // BinaryElem128 - construct from bytes
-                let low = u64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                ]);
-                let high = u64::from_le_bytes([
-                    bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
-                    bytes[15],
-                ]);
-
-                // Build field element bit by bit
-                let mut result = F::zero();
-
-                // Set bits 0-63
-                for i in 0..64 {
-                    if (low >> i) & 1 == 1 {
-                        let bit_value = F::from_bits(1u64 << i);
-                        result = result.add(&bit_value);
-                    }
-                }
-
-                // Set bits 64-127
-                let mut power_of_2_64 = F::from_bits(1u64 << 63);
-                power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
-
-                let mut current_power = power_of_2_64;
-                for i in 0..64 {
-                    if (high >> i) & 1 == 1 {
-                        result = result.add(&current_power);
-                    }
-                    if i < 63 {
-                        current_power = current_power.add(&current_power);
-                    }
-                }
-
-                result
-            }
-            _ => {
-                // Generic fallback
-                let mut result = F::zero();
-                for (byte_idx, &byte) in bytes.iter().enumerate().take(field_bytes) {
-                    for bit_idx in 0..8 {
-                        if (byte >> bit_idx) & 1 == 1 {
-                            let global_bit = byte_idx * 8 + bit_idx;
-                            if global_bit < 64 {
-                                result = result.add(&F::from_bits(1u64 << global_bit));
-                            }
-                        }
-                    }
-                }
-                result
-            }
-        }
+        elem_from_le_bytes(&bytes[..core::mem::size_of::<F>()])
     }
 
     fn get_query(&mut self, max: usize) -> usize {
