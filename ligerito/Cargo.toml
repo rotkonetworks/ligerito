@@ -1,6 +1,6 @@
 [package]
 name = "ligerito"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 authors.workspace = true
 license.workspace = true
@@ -159,8 +159,8 @@ cli = [
 
 [dependencies]
 # Core dependencies (always needed)
-ligerito-binary-fields = { version = "0.7.1", path = "../ligerito-binary-fields", default-features = false }
-ligerito-merkle = { version = "0.7.0", path = "../ligerito-merkle", default-features = false }
+ligerito-binary-fields = { version = "0.7.2", path = "../ligerito-binary-fields", default-features = false }
+ligerito-merkle = { version = "0.7.1", path = "../ligerito-merkle", default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"], optional = true }
 bytemuck = { workspace = true }
 

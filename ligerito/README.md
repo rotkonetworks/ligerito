@@ -272,7 +272,7 @@ wasm simd128 optimizations:
 
 ### benchmark results
 
-ligerito 0.7.1, amd ryzen 9 7945hx (16 cores / 32 threads, AVX-512 + VPCLMULQDQ),
+ligerito 0.8.0, amd ryzen 9 7945hx (16 cores / 32 threads, AVX-512 + VPCLMULQDQ),
 `-C target-cpu=native`, SHA-256 transcript, autosized configs, median of 5:
 
 | size | data | prove | verify | proof size |
