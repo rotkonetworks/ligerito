@@ -11,7 +11,7 @@ self.onmessage = async function(e) {
     // Initialize WASM once per worker (lazy init like Penumbra)
     // Must explicitly pass WASM path for workers
     if (!wasmInitialized) {
-      await init(new URL('./ligerito_bg.wasm', import.meta.url));
+      await init({ module_or_path: new URL('./ligerito_bg.wasm', import.meta.url) });
       console.log('[Worker] WASM initialized (SIMD enabled)');
       wasmInitialized = true;
     }
